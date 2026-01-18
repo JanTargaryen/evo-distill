@@ -157,7 +157,6 @@ class FlowmatchingActionHead(nn.Module):
         super().__init__()
 
         if config is not None:
-      
             embed_dim = getattr(config, "embed_dim", embed_dim)
             hidden_dim = getattr(config, "hidden_dim", hidden_dim)
             action_dim = getattr(config, "action_dim", action_dim)
@@ -198,7 +197,6 @@ class FlowmatchingActionHead(nn.Module):
 
         self.state_encoder = None
         if hasattr(self.config, "state_dim") and self.config.state_dim is not None:
-       
             state_hidden = getattr(self.config, "state_hidden_dim", embed_dim)
         
             self.state_encoder = CategorySpecificMLP(input_dim=self.config.state_dim,
@@ -208,10 +206,8 @@ class FlowmatchingActionHead(nn.Module):
 
         self.action_encoder = None
         if horizon > 1:
-          
             per_action_dim = getattr(self.config, "per_action_dim", None)
             if per_action_dim is None:
-            
                 per_action_dim = action_dim // horizon if action_dim % horizon == 0 else action_dim
             self.action_encoder = MultiEmbodimentActionEncoder(action_dim=per_action_dim,
                                                                embed_dim=embed_dim,
@@ -221,9 +217,10 @@ class FlowmatchingActionHead(nn.Module):
 
     def forward(self, fused_tokens: torch.Tensor, state: torch.Tensor = None,
                 actions_gt: torch.Tensor = None, embodiment_id: torch.LongTensor = None, 
-                state_mask: torch.Tensor = None, action_mask: torch.Tensor = None):
+                state_mask: torch.Tensor = None, action_mask: torch.Tensor = None,
+                z0: torch.Tensor = None, z1: torch.Tensor = None, is_reflow: bool = False):  # start and end actions for reflow
 
-        if actions_gt is None:
+        if actions_gt is None and not is_reflow:
             return self.get_action(fused_tokens, state=state, embodiment_id=embodiment_id)
         B = fused_tokens.size(0)
         device = fused_tokens.device
@@ -233,51 +230,55 @@ class FlowmatchingActionHead(nn.Module):
 
         context_tokens = fused_tokens 
         if state is not None and self.state_encoder is not None:
-
-
             state_emb = self.state_encoder(state, embodiment_id)  
             state_emb = state_emb.unsqueeze(1) 
-
             context_tokens = torch.cat([context_tokens, state_emb], dim=1) 
 
-        t = torch.distributions.Beta(2, 2).sample((B,)).clamp(0.02, 0.98).to(device).to(dtype=self.dtype)
+        if is_reflow: # is_reflow: target is velocity z1-z0
+            t_float = torch.rand(B, device=device)
+            time_index = (t_float * 1000).long().clamp(max=999)
+            time_emb = self.time_pos_enc(1000)[:, time_index, :].squeeze(0)
 
-        
-                    
-        time_index = (t * 1000).long()  
-        time_emb = self.time_pos_enc(1000)[:, time_index, :].squeeze(0) 
-    
-        action_shape = actions_gt.shape[1]  
-    
+            t = t_float.to(dtype=self.dtype)  # to bfloat16
 
-        actions_gt_seq = actions_gt  
-
-
-        noise = torch.rand_like(actions_gt) * 2 - 1  
-
-        if action_mask is not None:
-            action_mask = action_mask.to(dtype=noise.dtype, device=noise.device)
-            assert action_mask.shape == noise.shape, f"action_mask shape {action_mask.shape} != noise shape {noise.shape}"
-            noise = noise * action_mask
-
-
-        if self.horizon > 1:
-            noise_seq = noise.view(B, self.horizon, self.per_action_dim)
+            if self.horizon > 1:
+                t_expand = t.view(B, 1, 1)
+            else:
+                t_expand = t.view(B, 1)
             
-        else:
-            noise_seq = noise.unsqueeze(1)
+            action_intermediate_seq = t_expand * z1 + (1 - t_expand) * z0
+            target = z1 - z0 # Target Velocity
 
-        if self.horizon > 1:
-            t_broadcast = t.view(B, 1, 1)
         else:
-            t_broadcast = t.view(B, 1)
-        action_intermediate_seq = (1 - t_broadcast) * noise_seq + t_broadcast * actions_gt_seq  
+            # Original Flow Matching logic
+            t = torch.distributions.Beta(2, 2).sample((B,)).clamp(0.02, 0.98).to(device).to(dtype=self.dtype) # Beta distribution , trick
+            time_index = (t * 1000).long()  
+            time_emb = self.time_pos_enc(1000)[:, time_index, :].squeeze(0) 
+
+            actions_gt_seq = actions_gt  
+            noise = torch.rand_like(actions_gt) * 2 - 1   # rand_like * 2 - 1 : [0,1] -> [-1,1]
+
+            if action_mask is not None: # action mask: clear abundant 0 padding , avoid model to learn useless pattern
+                action_mask = action_mask.to(dtype=noise.dtype, device=noise.device)
+                assert action_mask.shape == noise.shape, f"action_mask shape {action_mask.shape} != noise shape {noise.shape}"
+                noise = noise * action_mask
+
+            if self.horizon > 1:
+                noise_seq = noise.view(B, self.horizon, self.per_action_dim)
+            else:
+                noise_seq = noise.unsqueeze(1)
+
+            if self.horizon > 1:
+                t_broadcast = t.view(B, 1, 1)
+            else:
+                t_broadcast = t.view(B, 1)
+            # (1 - t) * noise + t * actions_gt(ground )
+            action_intermediate_seq = (1 - t_broadcast) * noise_seq + t_broadcast * actions_gt_seq
+            target = noise
 
         if self.horizon > 1 and self.action_encoder is not None:
-     
             action_tokens = self.action_encoder(action_intermediate_seq, embodiment_id)  
         else:
-
             if not hasattr(self, "single_action_proj"):
                 self.single_action_proj = nn.Linear(self.per_action_dim, self.embed_dim).to(device)
             action_tokens = self.single_action_proj(action_intermediate_seq) 
@@ -289,40 +290,37 @@ class FlowmatchingActionHead(nn.Module):
         x = self.norm_out(x)  
 
         if self.horizon > 1:
- 
             x_flat = x.reshape(B, -1)  
-
             if not hasattr(self, "seq_pool_proj"):
-              
                 self.seq_pool_proj = nn.Linear(self.horizon * self.embed_dim, self.embed_dim).to(device)
             x_pooled = self.seq_pool_proj(x_flat)  
         else:
-          
             x_pooled = x.squeeze(1) 
 
         pred_velocity = self.mlp_head(x_pooled, embodiment_id) 
 
-        return pred_velocity, noise
+        return pred_velocity, target
 
-    def get_action(self, fused_tokens: torch.Tensor, state: torch.Tensor = None, embodiment_id: torch.LongTensor = None, action_mask: torch.Tensor = None):
+    def get_action(self, fused_tokens: torch.Tensor, state: torch.Tensor = None, embodiment_id: torch.LongTensor = None, action_mask: torch.Tensor = None, 
+                   init_noise: torch.Tensor = None):
 
-        print(f"action_mask shape: {action_mask.shape if action_mask is not None else 'None'}")
-        print(f"one sample action_mask: {action_mask[0] if action_mask is not None else 'None'}")
+        # print(f"action_mask shape: {action_mask.shape if action_mask is not None else 'None'}")
+        # print(f"one sample action_mask: {action_mask[0] if action_mask is not None else 'None'}")
 
         B = fused_tokens.size(0)
         device = fused_tokens.device
         if embodiment_id is None:
             embodiment_id = torch.zeros(B, dtype=torch.long, device=device)
 
+        # ViT patch tokens [batch,VLM token length 1024,emb dim 896]
         context_tokens = fused_tokens
         if state is not None and self.state_encoder is not None:
-
+            # state emb:[batch,1,emb dim]
             state_emb = self.state_encoder(state, embodiment_id).unsqueeze(1) 
             context_tokens = torch.cat([context_tokens, state_emb], dim=1)
 
         action_dim_total = getattr(self.config, "action_dim", None)
         if action_dim_total is None:
-          
             action_dim_total = self.action_dim
        
         if self.horizon > 1:
@@ -330,20 +328,20 @@ class FlowmatchingActionHead(nn.Module):
         else:
             per_action_dim = action_dim_total
 
-        action = (torch.rand(B, action_dim_total, device=device) * 2 - 1)
-        print(f"action shape: {action.shape}")
-        print(f"one sample action: {action[0]}")
+        if init_noise is not None: # action [B, action_dim * horizon]
+            action = init_noise.to(device)
+        else:
+            action = (torch.rand(B, action_dim_total, device=device) * 2 - 1)
 
         if self.horizon > 1:
             action_seq = action.view(B, self.horizon, per_action_dim)
-
         else:
             action_seq = action.view(B, 1, per_action_dim)
 
         action_mask = action_mask.view(B, 1, per_action_dim).repeat(1,self.horizon,1)
 
-        print(f"action_mask: {action_mask}")
-        print(f"one sample action_mask: {action_mask[0]}")
+        # print(f"action_mask: {action_mask}")
+        # print(f"one sample action_mask: {action_mask[0]}")
 
         if action_mask is not None:
             action_mask = action_mask.to(dtype=action_seq.dtype, device=action_seq.device)
@@ -351,8 +349,8 @@ class FlowmatchingActionHead(nn.Module):
             action_seq = action_seq * action_mask
         else:
             raise ValueError("action_mask must be provided for inference with flow matching.")
-        print(f"action shape: {action_seq.shape}")
-        print(f"one sample action: {action_seq[0]}")
+        # print(f"action shape: {action_seq.shape}")
+        # print(f"one sample action: {action_seq[0]}")
 
         N = int(getattr(self.config, "num_inference_timesteps", 32))
         dt = 1.0 / N
@@ -363,16 +361,13 @@ class FlowmatchingActionHead(nn.Module):
             time_emb = self.time_pos_enc(1000)[:, time_index, :].to(device).squeeze(0)  
             time_emb = time_emb.unsqueeze(0).repeat(B, 1)  
 
-
             if self.horizon > 1 and self.action_encoder is not None:
-
                 action_seq = action_seq * action_mask
                 action_tokens = self.action_encoder(action_seq, embodiment_id) 
             else:
                 if hasattr(self, "single_action_proj"):
                     action_tokens = self.single_action_proj(action_seq)  
                 else:
-
                     self.single_action_proj = nn.Linear(per_action_dim, self.embed_dim).to(device)
                     action_tokens = self.single_action_proj(action_seq)
 
@@ -386,7 +381,6 @@ class FlowmatchingActionHead(nn.Module):
                 if hasattr(self, "seq_pool_proj"):
                     x_pooled = self.seq_pool_proj(x_flat)
                 else:
-                   
                     self.seq_pool_proj = nn.Linear(self.horizon * self.embed_dim, self.embed_dim).to(device)
                     x_pooled = self.seq_pool_proj(x_flat)
             else:
@@ -405,11 +399,8 @@ class FlowmatchingActionHead(nn.Module):
 
     @property
     def device(self):
-      
         return next(self.parameters()).device
 
     @property
     def dtype(self):
-        
         return next(self.parameters()).dtype
-

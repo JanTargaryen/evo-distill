@@ -24,7 +24,7 @@ def make_log_path(prefix="eval"):
 LOG_PATH = make_log_path("mt50")
 # ====================================================
 
-SHOW_WINDOW = True
+SHOW_WINDOW = False
 SAVE_IMAGE = False
 SAVE_VIDEO = True  # save the video of each episode to disk
 
@@ -54,6 +54,7 @@ IMG_SIZE = (448, 448)
 # Evo1 & rollout settings
 STATE_TAKE = 8                
 HORIZON = 15                  
+EXECUTION_STEPS = 8
 EPISODES = 10                  
 EPISODE_HORIZON = 400          
 SEED = 4042
@@ -385,7 +386,7 @@ async def eval_mt50_with_groups(server_url: str,
                  
                     actions = await evo1_infer(ws, img_bgr, state_vec, prompt=task_prompt)
 
-                    for i in range(HORIZON):
+                    for i in range(EXECUTION_STEPS):
                         a4 = np.asarray(actions[i][:4], dtype=np.float32)
                         a4 = np.clip(a4, sub.action_space.low, sub.action_space.high)
                         obs, _, terminated, truncated, info = sub.step(a4)

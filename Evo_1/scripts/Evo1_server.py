@@ -66,7 +66,7 @@ def load_model_and_normalizer(ckpt_dir):
 
     config["finetune_vlm"] = False
     config["finetune_action_head"] = False
-    config["num_inference_timesteps"] = 32
+    config["num_inference_timesteps"] = 1
 
     model = EVO1(config).eval()
     ckpt_path = os.path.join(ckpt_dir, "mp_rank_00_model_states.pt")
@@ -146,7 +146,7 @@ async def handle_request(websocket, model, normalizer):
 
 # === 启动服务 ===
 if __name__ == "__main__":
-    ckpt_dir = "Your/Path/To/Checkpoint"
+    ckpt_dir = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/metaworld_test"
     #Example: ckpt_dir = "/home/dell/checkpoints/Evo1/Evo1_MetaWorld/"
 
     port = 9000

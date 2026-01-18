@@ -9,3 +9,5 @@ logs/
 checkpoints/
 Evo1_training_dataset/
 LIBERO/
+Metaworld_Dataset/
+training_data_cache/

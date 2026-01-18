@@ -32,7 +32,7 @@ def get_with_warning(config: dict, key: str, default):
         warnings.warn(f"'{key}' not found in config, using default: {default!r}")
         return default
 
-
+# read module dict , print which is trainable , which is frozen
 def inspect_named_submodules(module_dict: dict, verbose: bool = True):
 
     total_all, trainable_all = 0, 0
@@ -63,7 +63,7 @@ def inspect_named_submodules(module_dict: dict, verbose: bool = True):
     logging.info(f"ALL FROZEN    : {(total_all - trainable_all) / 1e6:.2f}M")
     logging.info("=" * 70)
 
-
+# stack the samples to batch
 def custom_collate_fn(batch):
     prompts = [item["prompt"] for item in batch]
     images = [item["images"] for item in batch]
@@ -85,6 +85,7 @@ def custom_collate_fn(batch):
         "embodiment_ids": embodiment_ids
     }
 
+# dynamic lr
 def get_lr_lambda(warmup_steps, total_steps, resume_step=0):
     def lr_lambda(current_step):
         current_step += resume_step  
@@ -185,7 +186,7 @@ def prepare_dataloader(dataset, config: dict) -> DataLoader:
         logging.info(f"Initialized dataloader with batch size {batch_size}")
     return dataloader
 
-
+# prevent NaN
 def check_numerical_stability(step: int, **named_tensors) -> bool:
     for name, tensor in named_tensors.items():
         if not torch.isfinite(tensor).all():
@@ -288,7 +289,7 @@ def load_checkpoint_with_deepspeed(model_engine, load_dir, accelerator, tag="ste
             raise RuntimeError(f"Failed to load DeepSpeed checkpoint from {load_dir} with tag {tag}: {str(e2)}")
 
     
-
+# compute and clip gradient
 def get_and_clip_grad_norm(accelerator, model, loss, max_norm: float = 1.0):
 
     if hasattr(accelerator, "get_global_grad_norm") and hasattr(accelerator, "clip_grad_norm_"):
