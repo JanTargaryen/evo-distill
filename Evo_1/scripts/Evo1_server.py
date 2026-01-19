@@ -144,10 +144,8 @@ async def handle_request(websocket, model, normalizer):
         print("Client disconnected.")
  
 
-# === 启动服务 ===
 if __name__ == "__main__":
-    ckpt_dir = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/metaworld_test"
-    #Example: ckpt_dir = "/home/dell/checkpoints/Evo1/Evo1_MetaWorld/"
+    ckpt_dir = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_online_new/reflow_step_1601"
 
     port = 9000
 

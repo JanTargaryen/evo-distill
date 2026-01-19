@@ -29,10 +29,10 @@ SAVE_DIR = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_refl
 TEACHER_STEPS = 50      
 BUFFER_SIZE = 2048       
 BATCH_SIZE_GEN = 32
-SAVE_EVERY_CYCLES = 50    
+SAVE_EVERY_CYCLES = 50 
 
 # students
-TRAIN_EPOCHS = 1             
+TRAIN_EPOCHS = 5             
 BATCH_SIZE_TRAIN = 128  
 LR = 1e-5                    
 
@@ -269,19 +269,38 @@ def main():
 
         # after train saving
         if cycle_idx % SAVE_EVERY_CYCLES == 0:
-            save_path = os.path.join(SAVE_DIR, f"evo1_online_step_{total_train_steps}.pt")
-            print(f"💾 Saving checkpoint to {save_path}...")
+            ckpt_subdir = os.path.join(SAVE_DIR, f"checkpoint_step_{total_train_steps}")
+            os.makedirs(ckpt_subdir, exist_ok=True)
+            
+            print(f"💾 Saving full checkpoint to {ckpt_subdir}...")
             
             final_dict = teacher_model.state_dict() 
             student_dict = student_head.state_dict()
             
-            # use Student weight fullfill Teacher Head
             for k, v in student_dict.items():
                 final_dict[f"action_head.{k}"] = v
             
-            torch.save({"module": final_dict}, save_path)
+            torch.save({"module": final_dict}, os.path.join(ckpt_subdir, "mp_rank_00_model_states.pt"))
             del final_dict 
-            print("✅ Saved.")
+
+            save_config = config_dict.copy()
+            save_config["num_inference_timesteps"] = 1 
+            with open(os.path.join(ckpt_subdir, "config.json"), "w") as f:
+                json.dump(save_config, f, indent=2)
+
+            if hasattr(dataset, "arm2stats_dict"):
+                with open(os.path.join(ckpt_subdir, "norm_stats.json"), "w") as f:
+                    json.dump(dataset.arm2stats_dict, f, indent=2)
+            
+            checkpoint_meta = {
+                "type": "ds_model",
+                "version": 0.0,
+                "checkpoints": "mp_rank_00_model_states.pt"
+            }
+            with open(os.path.join(ckpt_subdir, "checkpoint.json"), "w") as f:
+                json.dump(checkpoint_meta, f, indent=2)
+
+            print(f"✅ Saved successfully.")
 
         del temp_dataset, train_loader, buffer_data, loss_history
         gc.collect() 
