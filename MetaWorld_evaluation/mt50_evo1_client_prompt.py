@@ -26,8 +26,7 @@ LOG_PATH = make_log_path("mt50")
 
 SHOW_WINDOW = False
 SAVE_IMAGE = False
-SAVE_VIDEO = True  # save the video of each episode to disk
-
+SAVE_VIDEO = False
 # ===================== Debug image saving =====================
 INSPECT_SAMPLE_PER_EPISODE = True        
 INSPECT_DIR = "inspect_frames"           
@@ -45,7 +44,7 @@ VIDEO_DUP_FRAMES = 1  # Number of times to duplicate each frame when writing vid
 
 
 # ===================== User Config (edit here) =====================
-SERVER_URL = "ws://127.0.0.1:9000"
+SERVER_URL = "ws://127.0.0.1:9009"
 
 # Camera & image settings
 CAMERA_NAME = "corner2"        

@@ -235,6 +235,10 @@ class FlowmatchingActionHead(nn.Module):
             context_tokens = torch.cat([context_tokens, state_emb], dim=1) 
 
         if is_reflow: # is_reflow: target is velocity z1-z0
+            if action_mask is not None:
+                action_mask = action_mask.to(dtype=z0.dtype, device=z0.device)
+                z0 = z0 * action_mask
+                z1 = z1 * action_mask
             t_float = torch.rand(B, device=device)
             time_index = (t_float * 1000).long().clamp(max=999)
             time_emb = self.time_pos_enc(1000)[:, time_index, :].squeeze(0)

@@ -12,3 +12,4 @@ LIBERO/
 Metaworld_Dataset/
 training_data_cache/
 episode_videos/
+offline_distillation_data/
