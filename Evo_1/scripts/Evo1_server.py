@@ -145,9 +145,9 @@ async def handle_request(websocket, model, normalizer):
  
 
 if __name__ == "__main__":
-    ckpt_dir = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_online/checkpoint_step_28015"
+    ckpt_dir = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline/checkpoint_epoch_30"
 
-    port = 9009
+    port = 9010
 
     print("Loading EVO_1 model...")
     model, normalizer = load_model_and_normalizer(ckpt_dir)

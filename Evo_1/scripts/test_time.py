@@ -10,7 +10,7 @@ from PIL import Image
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from scripts.Evo1 import EVO1
 
-CKPT_DIR = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/metaworld" 
+CKPT_DIR = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline/checkpoint_epoch_30" 
 DEVICE = "cuda"
 NUM_WARMUP = 5    
 NUM_REPEAT = 20   

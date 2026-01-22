@@ -1,171 +1,149 @@
-# Evo_1/scripts/distill_vis_utils.py
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import io
 import PIL.Image
+import os
 from matplotlib.gridspec import GridSpec
 
 def fig2img(fig):
-    """将 Matplotlib Figure 转换为 PIL Image，用于 SwanLab/WandB 记录"""
+    """将 Matplotlib Figure 转换为 PIL Image"""
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
     buf.seek(0)
     img = PIL.Image.open(buf)
     return img
 
-def visualize_distill_batch(model, batch_data, device="cuda", step=0):
+def visualize_trajectory_batch(model, batch_data, device="cuda", step=0):
     """
-    输入一个 Batch 的数据，随机抽取一个样本，生成对比图。
+    升级版可视化：使用 get_action 进行真实的 1-Step 推理
     """
-    model.eval()
+    # 兼容性处理：获取真正的 Action Head
+    if hasattr(model, "action_head"):
+        predictor = model.action_head
+    else:
+        predictor = model
     
-    # 1. 解包数据
-    # batch_data 顺序参考 StreamingOfflineDataset yield 的顺序:
-    # z0, z1, ft, state, mask, eid
+    predictor.eval()
+    
+    # 1. 数据解包
     b_z0, b_z1, b_ft, b_state, b_mask, b_eid = [t.to(device) for t in batch_data]
     
-    # 2. 随机选一个有动作的样本 (避免选到 mask=0 的 padding)
-    # 简单的策略：选第一个 mask 为 1 的
+    # 2. 筛选有效样本
+    if b_mask.sum() == 0:
+        return None
+        
     valid_indices = torch.nonzero(b_mask[:, 0, 0]).squeeze()
-    if valid_indices.numel() == 0:
-        return None # 全是 Mask 掉的数据，不画了
+    if valid_indices.numel() == 0: 
+        idx = 0 
+    else:
+        idx = valid_indices[0] if valid_indices.numel() > 1 else valid_indices.item()
     
-    idx = valid_indices[0] if valid_indices.numel() > 1 else valid_indices.item()
-    
-    # 提取单个样本
-    z0 = b_z0[idx:idx+1]
-    z1_gt = b_z1[idx:idx+1] # Teacher
+    # 3. 提取单个样本 (保持 Batch 维度为 1)
+    z0 = b_z0[idx:idx+1]          # [1, 50, 24]
+    z1_gt = b_z1[idx:idx+1]       # [1, 50, 24]
     ft = b_ft[idx:idx+1]
     state = b_state[idx:idx+1]
     eid = b_eid[idx:idx+1]
-    
-    # 3. 模型推理 (Student)
+    mask = b_mask[idx:idx+1]      # [1, 50, 24]
+
+    # 4. 推理 (使用 get_action 模拟真实生成)
     with torch.no_grad():
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-            # Student 预测 Velocity
-            pred_vel, _ = model.action_head(
-                fused_tokens=ft, state=state, embodiment_id=eid,
-                z0=z0, z1=z1_gt, is_reflow=True
+            # 注意：get_action 需要的 mask 是 [B, Dim]，取第一个时间步即可
+            # z0 需要展平传入 [B, Horizon*Dim]
+            z1_pred_flat = predictor.get_action(
+                fused_tokens=ft, 
+                state=state, 
+                embodiment_id=eid, 
+                action_mask=mask[:, 0, :],  # [1, 24]
+                init_noise=z0.flatten(1)    # [1, 1200]
             )
-            z1_pred = z0 + pred_vel # 还原 Action
-    
-    # 4. 转换数据为 Numpy (只取第一步 Horizon=0)
-    # 假设动作维度是 [B, Horizon, Dim]
-    teacher_act = z1_gt[0, 0, :].float().cpu().numpy() # [Dim]
-    student_act = z1_pred[0, 0, :].float().cpu().numpy() # [Dim]
-    
-    # ================= 绘图逻辑 =================
-    fig = plt.figure(figsize=(14, 8))
-    gs = GridSpec(2, 3, figure=fig)
-    
-    # --- 区域 A: 罗盘 (Compass) - XY 平面方向 ---
-    ax_compass = fig.add_subplot(gs[0, 0])
-    ax_compass.set_title("Compass (XY Plane Direction)", fontsize=12, fontweight='bold')
-    ax_compass.set_xlim(-1.2, 1.2)
-    ax_compass.set_ylim(-1.2, 1.2)
-    ax_compass.axhline(0, color='gray', linestyle='--', alpha=0.5)
-    ax_compass.axvline(0, color='gray', linestyle='--', alpha=0.5)
-    
-    # 画原点
-    ax_compass.scatter(0, 0, color='black', s=50)
-    
-    # Teacher 箭头 (绿)
-    ax_compass.arrow(0, 0, teacher_act[0], teacher_act[1], 
-                     head_width=0.05, head_length=0.1, fc='lime', ec='green', label='Teacher', linewidth=2, alpha=0.7)
-    
-    # Student 箭头 (红)
-    ax_compass.arrow(0, 0, student_act[0], student_act[1], 
-                     head_width=0.05, head_length=0.1, fc='red', ec='maroon', label='Student', linewidth=2, alpha=0.7)
-    
-    ax_compass.legend(loc='upper right')
-    ax_compass.grid(True, linestyle=':', alpha=0.3)
-    ax_compass.set_aspect('equal')
+            
+            # 将结果还原回 [1, 50, 24]
+            z1_pred = z1_pred_flat.view_as(z0)
 
-    # --- 区域 B: 均衡器 (Equalizer) - 7维动作对比 ---
-    ax_bar = fig.add_subplot(gs[1, :]) # 占据底部整行
-    ax_bar.set_title("Action Dimensions Equalizer (GT vs Pred)", fontsize=12, fontweight='bold')
+    # 5. 转 Numpy
+    T_seq = z1_gt[0].float().cpu().numpy()   # Teacher
+    S_seq = z1_pred[0].float().cpu().numpy() # Student (Pred)
     
-    dims = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz', 'Gripper']
-    x = np.arange(len(dims))
-    width = 0.35
-    
-    rects1 = ax_bar.bar(x - width/2, teacher_act[:7], width, label='Teacher (GT)', color='lime', alpha=0.7)
-    rects2 = ax_bar.bar(x + width/2, student_act[:7], width, label='Student (Pred)', color='red', alpha=0.7)
-    
-    ax_bar.set_ylabel('Normalized Action Value')
-    ax_bar.set_xticks(x)
-    ax_bar.set_xticklabels(dims)
-    ax_bar.set_ylim(-1.2, 1.2)
-    ax_bar.legend()
-    ax_bar.grid(axis='y', linestyle='--', alpha=0.3)
-    
-    # --- 区域 C: 夹爪状态与指标 (Gripper & Info) ---
-    ax_info = fig.add_subplot(gs[0, 1:])
-    ax_info.axis('off')
-    
-    # 计算指标
-    mse = np.mean((teacher_act - student_act)**2)
-    cosine = np.dot(teacher_act, student_act) / (np.linalg.norm(teacher_act) * np.linalg.norm(student_act) + 1e-8)
-    
-    # 夹爪判断 (假设 > 0 为 Open, < 0 为 Close，具体看你的数据定义，这里只对比符号一致性)
-    g_teacher = teacher_act[6]
-    g_student = student_act[6]
-    gripper_match = (g_teacher * g_student) > 0 # 符号相同即匹配
-    
-    info_text = (
-        f"Step: {step}\n\n"
-        f"METRICS:\n"
-        f"  - MSE Loss: {mse:.5f}\n"
-        f"  - Cosine Sim: {cosine:.4f}\n\n"
-        f"GRIPPER STATUS (Dim 6):\n"
-        f"  - Teacher: {g_teacher:.2f}\n"
-        f"  - Student: {g_student:.2f}\n"
-        f"  - Status: "
-    )
-    
-    ax_info.text(0.1, 0.4, info_text, fontsize=14, fontfamily='monospace', va='center')
-    
-    # 绘制夹爪状态的大字
-    status_text = "MATCH ✅" if gripper_match else "MISMATCH ❌"
-    status_color = "green" if gripper_match else "red"
-    ax_info.text(0.5, 0.4, status_text, fontsize=20, fontweight='bold', color=status_color, va='center')
+    horizon = T_seq.shape[0]
+    time_steps = np.arange(horizon)
 
+    # ================= 绘图逻辑 (保持不变) =================
+    fig = plt.figure(figsize=(20, 9)) 
+    gs = GridSpec(2, 5, figure=fig)
+    
+    # Area 1: 3D 空间轨迹
+    ax_3d = fig.add_subplot(gs[:, 0], projection='3d')
+    ax_3d.set_title(f"3D Spatial Trajectory (Step {step})", fontsize=12, fontweight='bold')
+    ax_3d.plot(T_seq[:, 0], T_seq[:, 1], T_seq[:, 2], 'g.-', label='Teacher', linewidth=2, alpha=0.6)
+    ax_3d.plot(S_seq[:, 0], S_seq[:, 1], S_seq[:, 2], 'r.-', label='Student', linewidth=2, alpha=0.6)
+    ax_3d.scatter(T_seq[0,0], T_seq[0,1], T_seq[0,2], c='g', marker='o', s=50, label='Start')
+    ax_3d.scatter(T_seq[-1,0], T_seq[-1,1], T_seq[-1,2], c='g', marker='x', s=50, label='End')
+    ax_3d.set_xlabel('X'); ax_3d.set_ylabel('Y'); ax_3d.set_zlabel('Z'); ax_3d.legend()
+
+    # Area 2: 时序曲线
+    dims_cfg = [(0, "X"), (1, "Y"), (2, "Z"), (3, "Rx"), (4, "Ry"), (5, "Rz"), (6, "Gripper")]
+    for i, (dim_idx, name) in enumerate(dims_cfg):
+        if i < 4: ax = fig.add_subplot(gs[0, i+1])
+        else: ax = fig.add_subplot(gs[1, i-3])
+        ax.set_title(name, fontsize=10, fontweight='bold')
+        ax.plot(time_steps, T_seq[:, dim_idx], 'g.-', label='GT', alpha=0.7)
+        ax.plot(time_steps, S_seq[:, dim_idx], 'r.-', label='Pred', alpha=0.7)
+        ax.grid(True, linestyle=':', alpha=0.3)
+        if i == 0: ax.legend(fontsize=8)
+
+    plt.suptitle(f"Distillation Analysis (Epoch={step})", fontsize=16)
     plt.tight_layout()
-    
-    # 转为图片对象
     img = fig2img(fig)
     plt.close(fig)
     return img
 
+# ================= 自测代码 =================
 if __name__ == "__main__":
-    print("Test run...")
+    print("🚀 Running visualization test...")
     
     class MockModel:
         def eval(self): pass
-        def action_head(self, **kwargs): 
-            # 获取 z0 的 device，确保返回的 Tensor 也在同一个设备上
+        def train(self): pass
+        def action_head(self, **kwargs):
             z0 = kwargs.get('z0')
             device = z0.device if z0 is not None else "cpu"
-            return torch.zeros(1,1,7, device=device), None
+            z1_gt = kwargs.get('z1')
+            v_real = z1_gt - z0
+            # 模拟：Student 预测稍微有点误差
+            v_pred = v_real * 0.8 + torch.randn_like(v_real) * 0.05
+            return v_pred.to(device), None
+
+    # 生成模拟数据
+    H, B, D = 16, 1, 7
+    t = torch.linspace(0, 6.28, H)
+    z1_gt = torch.zeros(B, H, D)
+    z1_gt[0, :, 0] = torch.sin(t) 
+    z1_gt[0, :, 1] = torch.cos(t)
+    z1_gt[0, :, 2] = t / 6.28
+    z1_gt[0, :, 6] = torch.cat([torch.ones(8), -torch.ones(8)])
+    z0 = z1_gt + torch.randn_like(z1_gt) * 0.2
     
-    # 创建 dummy batch (在 CPU 上)
-    dummy_batch = [torch.randn(1,1,7) for _ in range(6)]
+    # 辅助数据
+    dummy_ft = torch.randn(B, 10, 768)
+    dummy_state = torch.randn(B, 7)
+    dummy_mask = torch.ones(B, H, D)
+    dummy_eid = torch.zeros(B, dtype=torch.long)
     
-    # 自动检测设备
+    batch_data = [z0, z1_gt, dummy_ft, dummy_state, dummy_mask, dummy_eid]
+    
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Testing on device: {device}")
     
     try:
-        # 运行可视化测试
-        img = visualize_distill_batch(MockModel(), dummy_batch, device=device)
-        print("✅ Visualization logic passed! Image object created.")
-        
-        # 可选：保存图片看看效果
-        img.save("test_vis.png")
-        print("Saved test_vis.png")
+        img = visualize_trajectory_batch(MockModel(), batch_data, device=device, step=100)
+        save_path = "test_trajectory_vis.png"
+        img.save(save_path)
+        print(f"✅ Success! Image saved to: {os.path.abspath(save_path)}")
         
     except Exception as e:
         import traceback
         traceback.print_exc()
-        print(f"❌ Test failed: {e}")
+        print(f"❌ Failed: {e}")

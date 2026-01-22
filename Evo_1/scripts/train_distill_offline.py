@@ -19,6 +19,7 @@ import signal
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from Evo1 import EVO1
+from scripts.distill_vis_utils import visualize_trajectory_batch
 
 # --- Configuration ---
 CONFIG_PATH = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/metaworld/config.json"
@@ -31,6 +32,7 @@ TRAIN_EPOCHS = 50
 BATCH_SIZE_TRAIN = 256
 LR = 1e-5
 SAVE_INTERVAL = 5
+VIS_INTERVAL = 500
 
 class StreamingOfflineDataset(IterableDataset):
     def __init__(self, data_dir, ratio=1.0):
@@ -151,7 +153,9 @@ def main():
     temp_teacher.load_state_dict(ckpt, strict=True)
     
     student_head = copy.deepcopy(temp_teacher.action_head)
-    
+    print("📦 Caching base model weights for full checkpoint saving...")
+    base_state_dict = copy.deepcopy(ckpt)
+
     # Clean up teacher to save VRAM
     del temp_teacher, ckpt
     torch.cuda.empty_cache()
@@ -225,6 +229,27 @@ def main():
             
             loss_val = loss.item()
             total_steps += 1
+            if total_steps % VIS_INTERVAL == 0:
+                gpu_batch = [b_z0, b_z1, b_ft, b_state, b_mask, b_eid]
+                
+                try:
+                    vis_img = visualize_trajectory_batch(
+                        model=student_head, 
+                        batch_data=gpu_batch, 
+                        device="cuda", 
+                        step=total_steps
+                    )
+                    
+                    if vis_img is not None:
+                        swanlab.log({"Eval/Trajectory_Curve": swanlab.Image(vis_img)}, step=total_steps)
+                        
+                except Exception as e:
+                    print(f"⚠️ Visualization failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+                student_head.train()
+
             batch_pbar.set_postfix({"Loss": f"{loss_val:.5f}", "Grad": f"{grad_norm:.2f}"})
             swanlab.log({"train/loss": loss_val, "train/grad_norm": grad_norm}, step=total_steps)
 
@@ -235,7 +260,17 @@ def main():
             os.makedirs(ckpt_subdir, exist_ok=True)
             
             torch.save(student_head.state_dict(), os.path.join(ckpt_subdir, "student_head_only.pt"))
-            
+            print("   Merging weights into full checkpoint...")
+            full_state_dict = copy.deepcopy(base_state_dict) 
+            student_state = student_head.state_dict()
+            for k, v in student_state.items():
+                full_key = f"action_head.{k}"
+                if full_key in full_state_dict:
+                    full_state_dict[full_key] = v.cpu()
+                else:
+                    print(f"⚠️ Warning: Key mismatch {full_key}")
+
+            torch.save({"module": full_state_dict}, os.path.join(ckpt_subdir, "mp_rank_00_model_states.pt"))
             save_config = config_dict.copy()
             save_config["num_inference_timesteps"] = 1
             with open(os.path.join(ckpt_subdir, "config.json"), "w") as f:
