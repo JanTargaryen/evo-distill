@@ -24,6 +24,7 @@ from scripts.train_utils.distill_vis_utils import visualize_trajectory_batch
 
 # --- Configuration ---
 CONFIG_PATH = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/metaworld/config.json"
+NORM_STATS_PATH = os.path.join(os.path.dirname(CONFIG_PATH), "norm_stats.json")
 CKPT_PATH = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/metaworld/mp_rank_00_model_states.pt"
 DATA_SAVE_DIR = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/dataset/offline_distillation_data"
 SAVE_DIR = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline_forever"
@@ -34,7 +35,7 @@ STUDENT_RESUME_PATH = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/check
 TRAIN_EPOCHS = 5000
 BATCH_SIZE_TRAIN = 256
 LR = 5e-5
-SAVE_INTERVAL = 5
+SAVE_INTERVAL = 20
 VIS_INTERVAL = 500
 
 class StreamingOfflineDataset(IterableDataset):
@@ -195,7 +196,7 @@ def main():
         full_dataset,
         batch_size=BATCH_SIZE_TRAIN,
         shuffle=False,
-        num_workers=6, 
+        num_workers=8, 
         pin_memory=True,
         drop_last=True
     )
@@ -306,6 +307,16 @@ def main():
             save_config["num_inference_timesteps"] = 1
             with open(os.path.join(ckpt_subdir, "config.json"), "w") as f:
                 json.dump(save_config, f, indent=2)
+
+            shutil.copy(NORM_STATS_PATH, os.path.join(ckpt_subdir, "norm_stats.json"))
+
+            checkpoint_meta = {
+                "type": "ds_model",
+                "version": 0.0,
+                "checkpoints": "mp_rank_00_model_states.pt"
+            }
+            with open(os.path.join(ckpt_subdir, "checkpoint.json"), "w") as f:
+                json.dump(checkpoint_meta, f, indent=2)
                 
             print(f"✅ Saved to {ckpt_subdir}")
 
@@ -322,6 +333,16 @@ def main():
     with open(os.path.join(ckpt_subdir, "config.json"), "w") as f:
         json.dump(save_config, f, indent=2)
         
+    if os.path.exists(NORM_STATS_PATH):
+        shutil.copy(NORM_STATS_PATH, os.path.join(ckpt_subdir, "norm_stats.json"))
+    
+    checkpoint_meta = {
+        "type": "ds_model",
+        "version": 0.0,
+        "checkpoints": "mp_rank_00_model_states.pt"
+    }
+    with open(os.path.join(ckpt_subdir, "checkpoint.json"), "w") as f:
+        json.dump(checkpoint_meta, f, indent=2)
     print(f"✅ Training Complete. Saved to {ckpt_subdir}")
 
 if __name__ == "__main__":
