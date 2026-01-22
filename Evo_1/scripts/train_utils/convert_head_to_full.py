@@ -40,8 +40,8 @@ def merge_checkpoint(head_ckpt_path, output_dir):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--head", type=str, default="/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline/checkpoint_epoch_30/student_head_only.pt")
-    parser.add_argument("--out", type=str, default="/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline/checkpoint_epoch_30")
+    parser.add_argument("--head", type=str, default="/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline/checkpoint_epoch_50/student_head_only.pt")
+    parser.add_argument("--out", type=str, default="/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline/checkpoint_epoch_50")
     args = parser.parse_args()
 
     merge_checkpoint(args.head, args.out)

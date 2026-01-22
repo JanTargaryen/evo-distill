@@ -16,21 +16,24 @@ import random
 import torch
 import atexit
 import signal
+import torch.nn.functional as F
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from Evo1 import EVO1
-from scripts.distill_vis_utils import visualize_trajectory_batch
+from scripts.train_utils.distill_vis_utils import visualize_trajectory_batch
 
 # --- Configuration ---
 CONFIG_PATH = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/metaworld/config.json"
 CKPT_PATH = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/metaworld/mp_rank_00_model_states.pt"
 DATA_SAVE_DIR = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/dataset/offline_distillation_data"
-SAVE_DIR = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline"
+SAVE_DIR = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline_forever"
+# STUDENT_RESUME_PATH = None  # Start training from scratch
+STUDENT_RESUME_PATH = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline/checkpoint_epoch_50/mp_rank_00_model_states.pt"  
 
 # Training Settings
-TRAIN_EPOCHS = 50
+TRAIN_EPOCHS = 5000
 BATCH_SIZE_TRAIN = 256
-LR = 1e-5
+LR = 5e-5
 SAVE_INTERVAL = 5
 VIS_INTERVAL = 500
 
@@ -141,23 +144,40 @@ def main():
         config={"batch_size": BATCH_SIZE_TRAIN, "lr": LR, "epochs": TRAIN_EPOCHS}
     )
 
-    # 1. Initialize Student (Load Teacher weights solely for initialization)
-    print("🔧 Initializing Student Model from Teacher Checkpoint...")
+    # 1. Initialize Student
+    print("🔧 Initializing Student Model...")
     with open(CONFIG_PATH, "r") as f:
         config_dict = json.load(f)
     
-    # Temporarily load teacher to copy weights
-    temp_teacher = EVO1(config_dict).cuda().to(torch.bfloat16)
-    ckpt = torch.load(CKPT_PATH, map_location="cpu")
-    if "module" in ckpt: ckpt = ckpt["module"]
-    temp_teacher.load_state_dict(ckpt, strict=True)
+    temp_model = EVO1(config_dict).cuda().to(torch.bfloat16)
+    student_head = copy.deepcopy(temp_model.action_head)
     
-    student_head = copy.deepcopy(temp_teacher.action_head)
-    print("📦 Caching base model weights for full checkpoint saving...")
-    base_state_dict = copy.deepcopy(ckpt)
+    if STUDENT_RESUME_PATH and os.path.exists(STUDENT_RESUME_PATH):
+        print(f"🔄 Resuming from Student Checkpoint: {STUDENT_RESUME_PATH}")
+        student_ckpt = torch.load(STUDENT_RESUME_PATH, map_location="cpu")
+        state_dict = {
+            k.replace("action_head.", ""): v 
+            for k, v in student_ckpt["module"].items() 
+            if k.startswith("action_head.")
+        }
+        student_head.load_state_dict(state_dict, strict=True)
+        print("✅ Student weights loaded successfully.")
+        ckpt_teacher = torch.load(CKPT_PATH, map_location="cpu")
+        if "module" in ckpt_teacher: ckpt_teacher = ckpt_teacher["module"]
+        base_state_dict = copy.deepcopy(ckpt_teacher)
+        del ckpt_teacher
 
-    # Clean up teacher to save VRAM
-    del temp_teacher, ckpt
+    else:
+        print("⚠️ No Student Checkpoint found, initializing from Teacher...")
+        ckpt_teacher = torch.load(CKPT_PATH, map_location="cpu")
+        if "module" in ckpt_teacher: ckpt_teacher = ckpt_teacher["module"]
+        
+        temp_model.load_state_dict(ckpt_teacher, strict=True)
+        student_head = copy.deepcopy(temp_model.action_head)
+        base_state_dict = copy.deepcopy(ckpt_teacher)
+        del ckpt_teacher
+
+    del temp_model
     torch.cuda.empty_cache()
     
     student_head.train()
@@ -175,7 +195,7 @@ def main():
         full_dataset,
         batch_size=BATCH_SIZE_TRAIN,
         shuffle=False,
-        num_workers=4, 
+        num_workers=6, 
         pin_memory=True,
         drop_last=True
     )
@@ -227,31 +247,42 @@ def main():
             grad_norm = torch.nn.utils.clip_grad_norm_(student_head.parameters(), max_norm=1.0)
             optimizer.step()
             
+            with torch.no_grad():
+                cos_sim = F.cosine_similarity(pred_v, target_v, dim=1, eps=1e-8)
+                
+                valid_sample_mask = (mask_flat.sum(dim=1) > 0).float()
+                
+                avg_cos_sim = (cos_sim * valid_sample_mask).sum() / (valid_sample_mask.sum() + 1e-8)
+                avg_cos_sim_val = avg_cos_sim.item()
+
             loss_val = loss.item()
             total_steps += 1
             if total_steps % VIS_INTERVAL == 0:
                 gpu_batch = [b_z0, b_z1, b_ft, b_state, b_mask, b_eid]
                 
-                try:
-                    vis_img = visualize_trajectory_batch(
-                        model=student_head, 
-                        batch_data=gpu_batch, 
-                        device="cuda", 
-                        step=total_steps
-                    )
-                    
-                    if vis_img is not None:
-                        swanlab.log({"Eval/Trajectory_Curve": swanlab.Image(vis_img)}, step=total_steps)
-                        
-                except Exception as e:
-                    print(f"⚠️ Visualization failed: {e}")
-                    import traceback
-                    traceback.print_exc()
+                vis_img = visualize_trajectory_batch(
+                    model=student_head, 
+                    batch_data=gpu_batch, 
+                    device="cuda", 
+                    step=total_steps
+                )
+                
+                if vis_img is not None:
+                    swanlab.log({"Eval/Trajectory_Curve": swanlab.Image(vis_img)}, step=total_steps)
+
 
                 student_head.train()
 
-            batch_pbar.set_postfix({"Loss": f"{loss_val:.5f}", "Grad": f"{grad_norm:.2f}"})
-            swanlab.log({"train/loss": loss_val, "train/grad_norm": grad_norm}, step=total_steps)
+            batch_pbar.set_postfix({
+                "Loss": f"{loss_val:.5f}", 
+                "Grad": f"{grad_norm:.2f}",
+                "Cos": f"{avg_cos_sim_val:.4f}"
+            })
+            swanlab.log({
+                "train/loss": loss_val, 
+                "train/grad_norm": grad_norm,
+                "train/cosine_similarity": avg_cos_sim_val
+            }, step=total_steps)
 
         if (epoch + 1) % SAVE_INTERVAL == 0:
             print(f"\n💾 Saving checkpoint at Epoch {epoch+1}...")

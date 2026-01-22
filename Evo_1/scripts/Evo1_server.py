@@ -145,9 +145,14 @@ async def handle_request(websocket, model, normalizer):
  
 
 if __name__ == "__main__":
-    ckpt_dir = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline/checkpoint_epoch_30"
+    import argparse
+    parser = argparse.ArgumentParser(description="Evo1 Server")
+    parser.add_argument("--port", type=int, default=9010, help="Port to run the server on")
+    parser.add_argument("--ckpt_dir", type=str, required=True, help="Path to checkpoint directory")
+    args = parser.parse_args()
 
-    port = 9010
+    ckpt_dir = args.ckpt_dir
+    port = args.port
 
     print("Loading EVO_1 model...")
     model, normalizer = load_model_and_normalizer(ckpt_dir)

@@ -8,12 +8,9 @@ import swanlab
 import gzip
 from datetime import datetime
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__), ".."))))
 from Evo1 import EVO1
-try:
-    from scripts.distill_vis_utils import visualize_trajectory_batch
-except ImportError:
-    from distill_vis_utils import visualize_trajectory_batch
+from scripts.utils.distill_vis_utils import visualize_trajectory_batch
 
 CKPT_DIR = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline"
 DATA_DIR = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/dataset/offline_distillation_data"

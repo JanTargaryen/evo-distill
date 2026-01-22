@@ -7,7 +7,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 import swanlab
 import gzip
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__), ".."))))
 from scripts.train import prepare_dataset, custom_collate_fn
 from Evo1 import EVO1
 

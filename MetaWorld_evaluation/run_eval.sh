@@ -55,7 +55,7 @@ tmux send-keys -t $SESSION:0.1 "export CUDA_VISIBLE_DEVICES=$GPU_ID" C-m
 tmux send-keys -t $SESSION:0.1 "cd /mnt/data_ssd/zhoufang/code/Evo-1/MetaWorld_evaluation" C-m
 
 tmux send-keys -t $SESSION:0.1 "echo '[INFO] Waiting 20s for Server to load model...'" C-m
-tmux send-keys -t $SESSION:0.1 "sleep 60" C-m
+tmux send-keys -t $SESSION:0.1 "sleep 180" C-m
 
 tmux send-keys -t $SESSION:0.1 "python mt50_evo1_client_prompt.py --port $PORT --ckpt_dir \"$CKPT_DIR\"" C-m
 
