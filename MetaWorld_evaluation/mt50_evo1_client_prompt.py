@@ -14,14 +14,7 @@ import random
 import datetime
 
 # ===================== Logging =====================
-LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)
 
-def make_log_path(prefix="eval"):
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    return os.path.join(LOG_DIR, f"{prefix}_{ts}.txt")
-
-LOG_PATH = make_log_path("mt50")
 # ====================================================
 
 SHOW_WINDOW = False
@@ -44,7 +37,6 @@ VIDEO_DUP_FRAMES = 1  # Number of times to duplicate each frame when writing vid
 
 
 # ===================== User Config (edit here) =====================
-SERVER_URL = "ws://127.0.0.1:9009"
 
 # Camera & image settings
 CAMERA_NAME = "corner2"        
@@ -55,7 +47,7 @@ STATE_TAKE = 8
 HORIZON = 15                  
 EXECUTION_STEPS = 8
 EPISODES = 10                  
-EPISODE_HORIZON = 400          
+EPISODE_HORIZON = 200          
 SEED = 4042
 
 TARGET_LEVEL = "all"   # one of "all", "easy", "medium", "hard", "very_hard"
@@ -437,57 +429,40 @@ async def eval_mt50_with_groups(server_url: str,
 
 
 # ---------------- Entrypoint ----------------
-async def _amain():
+async def _amain(target_url: str):
     per_task, per_group, overall = await eval_mt50_with_groups(
-        server_url=SERVER_URL,
+        server_url=target_url,
         num_eval_episodes=EPISODES,
         episode_horizon=EPISODE_HORIZON,
         seed=SEED,
     )
 
-    # Pretty print
-    # print("\n==== Per-task success rate ====")
-    # for slug, rate in per_task.items():
-    #     print(f"{slug:24s}  {rate:.3f}")
-
-    # print("\n==== Difficulty buckets ====")
-    # print(f"easy      : {per_group.get('easy', 0.0):.3f}")
-    # print(f"medium    : {per_group.get('medium', 0.0):.3f}")
-    # print(f"hard      : {per_group.get('hard', 0.0):.3f}")
-    # print(f"very_hard : {per_group.get('very_hard', 0.0):.3f}")
-
     avg = (per_group.get('easy', 0.0) + per_group.get('medium', 0.0) + per_group.get('hard', 0.0) + per_group.get('very_hard', 0.0)) / 4
-    # print(f"\n==== Overall Average as Success Rate ====\n{avg:.3f}")
 
     # log
     log_write(f"\n==== Evaluation Log ====\nLog file: {LOG_PATH}")
     log_write(f"Target difficulty: {TARGET_LEVEL}")
-    log_write(f"Server URL: {SERVER_URL}")
+    log_write(f"Server URL: {target_url}")  # Log the actual URL used
     log_write(f"Episodes per task: {EPISODES}")
-    log_write(f"Episode horizon: {EPISODE_HORIZON}")
-    log_write(f"HORIZON: {HORIZON}")
-    log_write(f"Seed: {SEED}\n")
-    
-
-    log_write("==== Per-task success rate ====")
-    for slug, rate in per_task.items():
-        log_write(f"{slug:24s}  {rate:.3f}")
-
-    log_write("\n==== Difficulty buckets ====")
-    log_write(f"easy      : {per_group.get('easy', 0.0):.3f}")
-    log_write(f"medium    : {per_group.get('medium', 0.0):.3f}")
-    log_write(f"hard      : {per_group.get('hard', 0.0):.3f}")
-    log_write(f"very_hard : {per_group.get('very_hard', 0.0):.3f}")
-
     log_write(f"\n==== Overall Average as Success Rate ====\n{avg:.3f}")
 
 if __name__ == "__main__":
-    asyncio.run(_amain())
+    import argparse
+    parser = argparse.ArgumentParser(description="MT50 Evo1 Client")
+    parser.add_argument("--port", type=int, default=9010, help="Port to connect to server")
+    parser.add_argument("--ckpt_dir", type=str, required=True, help="Path to checkpoint directory")
+    args = parser.parse_args()
 
+    exp_name = os.path.basename(os.path.normpath(args.ckpt_dir))
+    LOG_DIR = "logs"
+    os.makedirs(LOG_DIR, exist_ok=True)
 
+    def make_log_path(prefix="eval"):
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        return os.path.join(LOG_DIR, f"{prefix}_{ts}.txt")
 
-# if __name__ == "__main__":
-#     N_REPEAT = 1
-#     for run_id in range(N_REPEAT):
-#         print(f"\n\n===== 🌟 Run {run_id + 1}/{N_REPEAT} =====")
-#         asyncio.run(_amain())
+    LOG_PATH = make_log_path(exp_name)
+
+    target_url = f"ws://127.0.0.1:{args.port}"
+    
+    asyncio.run(_amain(target_url))
