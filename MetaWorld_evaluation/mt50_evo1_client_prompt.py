@@ -444,6 +444,11 @@ async def _amain(target_url: str):
     log_write(f"Target difficulty: {TARGET_LEVEL}")
     log_write(f"Server URL: {target_url}")  # Log the actual URL used
     log_write(f"Episodes per task: {EPISODES}")
+    log_write(f"\n==== Detailed Success Rates ====")
+    log_write(f"Easy:      {per_group.get('easy', 0.0):.3f}")
+    log_write(f"Medium:    {per_group.get('medium', 0.0):.3f}")
+    log_write(f"Hard:      {per_group.get('hard', 0.0):.3f}")
+    log_write(f"Very Hard: {per_group.get('very_hard', 0.0):.3f}")
     log_write(f"\n==== Overall Average as Success Rate ====\n{avg:.3f}")
 
 if __name__ == "__main__":

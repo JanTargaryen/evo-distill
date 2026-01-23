@@ -66,7 +66,7 @@ def load_model_and_normalizer(ckpt_dir):
 
     config["finetune_vlm"] = False
     config["finetune_action_head"] = False
-    config["num_inference_timesteps"] = 1
+    config["num_inference_timesteps"] = 4
 
     model = EVO1(config).eval()
     ckpt_path = os.path.join(ckpt_dir, "mp_rank_00_model_states.pt")
