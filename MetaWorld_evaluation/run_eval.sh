@@ -60,7 +60,7 @@ echo '[INFO] Evaluation Finished!'; \
 echo '[INFO] Session will auto-close in 10 seconds...'; \
 echo '==========================================='; \
 sleep 10; \
-"
+tmux kill-session -t $SESSION"
 
 tmux send-keys -t $SESSION:0.1 "$CLIENT_CMD" C-m
 
