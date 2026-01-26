@@ -3,7 +3,7 @@ import asyncio
 import json
 import os
 from typing import List, Optional, Dict, Set
-
+import time
 import cv2
 import gymnasium as gym
 import metaworld  # noqa: F401
@@ -190,8 +190,13 @@ async def evo1_infer(ws, img_bgr: np.ndarray, state_vec: List[float], prompt: Op
         "action_mask": [1, 1, 1, 1] + [0]*20,
     }
     await ws.send(json.dumps(payload))
-    data = json.loads(await ws.recv())
-    return np.asarray(data, dtype=np.float32)
+    resp_text = await ws.recv()
+    resp_data = json.loads(resp_text)
+    
+    actions = np.asarray(resp_data["action"], dtype=np.float32)
+    latency = resp_data["latency"]
+    
+    return actions, latency
 
 
 def save_sent_bgr_frame(img_bgr: np.ndarray, ep_num: int, idx: int, slug: str, step: Optional[int] = None):
@@ -303,26 +308,27 @@ async def eval_mt50_with_groups(server_url: str,
     
     if TARGET_LEVEL.lower() != "all":
         allowed_slugs = groups.get(TARGET_LEVEL.lower(), set())
-        before = len(ordered_indices)
         ordered_indices = [i for i in ordered_indices if idx_to_slug.get(i, "") in allowed_slugs]
-        print(f"[INFO] Filtered tasks: keep only {TARGET_LEVEL} ({len(ordered_indices)}/{before})")
-
 
     # 3) Accumulators
     success_counts: Dict[int, int] = {i: 0 for i in ordered_indices}
     trials_counts: Dict[int, int] = {i: 0 for i in ordered_indices}
     group_success = {k: 0 for k in ["easy", "medium", "hard", "very_hard"]}
     group_trials  = {k: 0 for k in ["easy", "medium", "hard", "very_hard"]}
+    
+    # global accumulators
+    total_inference_latency_ms = 0.0
+    total_inference_steps = 0
 
     # 4) Main loop
     async with websockets.connect(server_url, max_size=100_000_000) as ws:
         for idx in ordered_indices:
             sub = envs.envs[idx]
             slug = idx_to_slug.get(idx, f"task-{idx}")
-
-            
             task_prompt = PROMPTS.get(idx, slug=slug)
-            
+
+            task_inference_latency_ms = 0.0
+            task_inference_steps = 0
 
             gname_for_task = None
             for gname in group_trials.keys():
@@ -341,7 +347,6 @@ async def eval_mt50_with_groups(server_url: str,
                 inspect_choice = INSPECT_SAMPLE_PER_EPISODE
                 saved_this_episode = False
 
-               
                 obs, _ = sub.reset(seed=seed + ep)  
                 trials_counts[idx] += 1
                 if gname_for_task is not None:
@@ -373,9 +378,12 @@ async def eval_mt50_with_groups(server_url: str,
                         saved_this_episode = True
 
                     state_vec = obs_to_state(obs)
-
-                 
-                    actions = await evo1_infer(ws, img_bgr, state_vec, prompt=task_prompt)
+                  
+                    actions, latency_ms = await evo1_infer(ws, img_bgr, state_vec, prompt=task_prompt)
+                    total_inference_latency_ms += latency_ms
+                    total_inference_steps += 1
+                    task_inference_latency_ms += latency_ms
+                    task_inference_steps += 1
 
                     for i in range(EXECUTION_STEPS):
                         a4 = np.asarray(actions[i][:4], dtype=np.float32)
@@ -394,23 +402,27 @@ async def eval_mt50_with_groups(server_url: str,
                             done = True
                             break
                 
-                # close video writer
                 if done and SAVE_VIDEO:
                     final_frame = render_single_bgr(sub)
                     write_video(video_writer, final_frame)
                     save_episode_video(video_writer, video_name, idx, slug, ep + 1)
                 
-          
             s = success_counts[idx]
             t = trials_counts[idx]
             task_rate = s / max(1, t)
+            
+            avg_task_lat = 0.0
+            if task_inference_steps > 0:
+                avg_task_lat = task_inference_latency_ms / task_inference_steps
+            
             msg = (f"[Task {idx} {slug}] {task_prompt} finished {num_eval_episodes} episodes -> "
-                  f"success_rate={task_rate:.3f}  (s={s}, t={t})")
+                   f"success_rate={task_rate:.3f}  latency={avg_task_lat:.2f}ms (s={s}, t={t})")
             log_write(msg)
+            # ============================================
 
     envs.close()
 
-    # 5) Build metrics
+    # 5) Build metrics (保持不变)
     per_task: Dict[str, float] = {}
     for idx in ordered_indices:
         slug = idx_to_slug.get(idx, f"task-{idx}")
@@ -425,12 +437,16 @@ async def eval_mt50_with_groups(server_url: str,
     overall = (sum(success_counts.values()) /
                max(1, sum(trials_counts.values())))
 
-    return per_task, per_group, overall
+    avg_latency = 0.0
+    if total_inference_steps > 0:
+        avg_latency = total_inference_latency_ms / total_inference_steps
+
+    return per_task, per_group, overall, avg_latency
 
 
 # ---------------- Entrypoint ----------------
 async def _amain(target_url: str):
-    per_task, per_group, overall = await eval_mt50_with_groups(
+    per_task, per_group, overall, avg_latency = await eval_mt50_with_groups(
         server_url=target_url,
         num_eval_episodes=EPISODES,
         episode_horizon=EPISODE_HORIZON,

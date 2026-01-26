@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 GPU_ID=$1
 PORT=$2
 CKPT_DIR=$3
@@ -35,7 +34,6 @@ if [ $? == 0 ]; then
 fi
 
 tmux new-session -d -s $SESSION
-
 tmux split-window -h -t $SESSION
 
 # ================= SERVER (Pane 0.0) =================
@@ -44,7 +42,6 @@ tmux send-keys -t $SESSION:0.0 "conda activate evo" C-m
 tmux send-keys -t $SESSION:0.0 "export CUDA_VISIBLE_DEVICES=$GPU_ID" C-m
 tmux send-keys -t $SESSION:0.0 "cu124" C-m
 tmux send-keys -t $SESSION:0.0 "cd /mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/scripts" C-m
-
 tmux send-keys -t $SESSION:0.0 "python Evo1_server.py --port $PORT --ckpt_dir \"$CKPT_DIR\"" C-m
 
 
@@ -55,10 +52,17 @@ tmux send-keys -t $SESSION:0.1 "export CUDA_VISIBLE_DEVICES=$GPU_ID" C-m
 tmux send-keys -t $SESSION:0.1 "cd /mnt/data_ssd/zhoufang/code/Evo-1/MetaWorld_evaluation" C-m
 
 tmux send-keys -t $SESSION:0.1 "echo '[INFO] Waiting 20s for Server to load model...'" C-m
-tmux send-keys -t $SESSION:0.1 "sleep 180" C-m
+tmux send-keys -t $SESSION:0.1 "sleep 60" C-m
 
-tmux send-keys -t $SESSION:0.1 "python mt50_evo1_client_prompt.py --port $PORT --ckpt_dir \"$CKPT_DIR\"" C-m
+CLIENT_CMD="python mt50_evo1_client_prompt.py --port $PORT --ckpt_dir \"$CKPT_DIR\"; \
+echo '==========================================='; \
+echo '[INFO] Evaluation Finished!'; \
+echo '[INFO] Session will auto-close in 10 seconds...'; \
+echo '==========================================='; \
+sleep 10; \
+tmux kill-session -t $SESSION"
 
-# Attach
+tmux send-keys -t $SESSION:0.1 "$CLIENT_CMD" C-m
+
 echo "[SUCCESS] Attaching to tmux..."
 tmux attach -t $SESSION

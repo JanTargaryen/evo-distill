@@ -66,7 +66,7 @@ def load_model_and_normalizer(ckpt_dir):
 
     config["finetune_vlm"] = False
     config["finetune_action_head"] = False
-    config["num_inference_timesteps"] = 4
+    config["num_inference_timesteps"] = 50
 
     model = EVO1(config).eval()
     ckpt_path = os.path.join(ckpt_dir, "mp_rank_00_model_states.pt")
@@ -112,20 +112,25 @@ def infer_from_json_dict(data: dict, model, normalizer):
     image_mask = torch.tensor(data["image_mask"], dtype=torch.int32, device=device)
     action_mask = torch.tensor([data["action_mask"]],dtype=torch.int32, device=device)
 
-    print(f"image_mask,{image_mask}")
-    print(f"action_mask,{action_mask}")
+    # print(f"image_mask,{image_mask}")
+    # print(f"action_mask,{action_mask}")
     
     with torch.no_grad() and torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-        action = model.run_inference(
+        action_raw, latency = model.run_inference(
             images=images,
             image_mask=image_mask,
             prompt=prompt,
             state_input=norm_state,
             action_mask=action_mask
         )
-        action = action.reshape(1, -1, 24)
-        action = normalizer.denormalize_action(action[0])
-        return action.cpu().numpy().tolist()
+
+        action_raw = action_raw.reshape(1, -1, 24)
+        action_denorm = normalizer.denormalize_action(action_raw[0])
+        
+        return {
+            "action": action_denorm.cpu().numpy().tolist(),
+            "latency": latency
+        }
 
 
 async def handle_request(websocket, model, normalizer):
@@ -134,10 +139,10 @@ async def handle_request(websocket, model, normalizer):
         async for message in websocket:
            
             json_data = json.loads(message)
-            print(f"Received JSON observation")
+            # print(f"Received JSON observation")
             actions = infer_from_json_dict(json_data, model, normalizer)
             await websocket.send(json.dumps(actions))
-            print("Sent action chunk")
+            # print("Sent action chunk")
 
 
     except websockets.exceptions.ConnectionClosed:

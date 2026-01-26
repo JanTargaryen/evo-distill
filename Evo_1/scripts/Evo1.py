@@ -6,6 +6,7 @@ from typing import List, Union, Tuple
 from PIL import Image
 import torch
 import torch.nn as nn
+import time
 from model.internvl3.internvl3_embedder import InternVL3Embedder
 from model.action_head.flow_matching import FlowmatchingActionHead
 import logging
@@ -96,7 +97,6 @@ class EVO1(nn.Module):
         action_mask: torch.Tensor = None,
         embodiment_ids: torch.Tensor = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        
         if actions_gt is None:
             return self.action_head.get_action(fused_tokens, state=state, action_mask=action_mask, embodiment_id=embodiment_ids)
         else:
@@ -112,8 +112,8 @@ class EVO1(nn.Module):
         state_input: Union[list, torch.Tensor],
         return_cls_only: Union[bool, None] = None,
         action_mask: Union[torch.Tensor, None] = None
-    ) -> torch.Tensor:
-
+    ):
+        t0 = time.time()
         fused_tokens = self.get_vl_embeddings(
                         images=images,
                         image_mask=image_mask,
@@ -123,8 +123,12 @@ class EVO1(nn.Module):
                     )
 
         state_tensor = self.prepare_state(state_input)  
+        action = self.predict_action(fused_tokens, state_tensor, action_mask=action_mask)
+        t1 = time.time()
         
-        return self.predict_action(fused_tokens, state_tensor, action_mask=action_mask)
+        latency = (t1 - t0) * 1000
+        
+        return action, latency
     
 
     def forward(self, fused_tokens, state=None, actions_gt=None, action_mask=None, embodiment_ids=None):

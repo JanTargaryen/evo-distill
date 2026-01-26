@@ -29,7 +29,7 @@ CKPT_PATH = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/metaworld/mp_ra
 DATA_SAVE_DIR = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/dataset/offline_distillation_data"
 SAVE_DIR = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline_forever"
 # STUDENT_RESUME_PATH = None  # Start training from scratch
-STUDENT_RESUME_PATH = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline/checkpoint_epoch_50/mp_rank_00_model_states.pt"  
+STUDENT_RESUME_PATH = "/mnt/data_ssd/zhoufang/code/Evo-1/Evo_1/checkpoints/checkpoints_reflow_offline/checkpoint_epoch_70/mp_rank_00_model_states.pt"  
 
 # Training Settings
 TRAIN_EPOCHS = 5000
@@ -196,7 +196,7 @@ def main():
         full_dataset,
         batch_size=BATCH_SIZE_TRAIN,
         shuffle=False,
-        num_workers=8, 
+        num_workers=6, 
         pin_memory=True,
         drop_last=True
     )
@@ -332,7 +332,7 @@ def main():
     torch.save(student_head.state_dict(), os.path.join(ckpt_subdir, "student_head_only.pt"))
     with open(os.path.join(ckpt_subdir, "config.json"), "w") as f:
         json.dump(save_config, f, indent=2)
-        
+
     if os.path.exists(NORM_STATS_PATH):
         shutil.copy(NORM_STATS_PATH, os.path.join(ckpt_subdir, "norm_stats.json"))
     

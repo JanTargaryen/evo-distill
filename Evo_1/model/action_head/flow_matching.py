@@ -305,102 +305,162 @@ class FlowmatchingActionHead(nn.Module):
 
         return pred_velocity, target
 
-    def get_action(self, fused_tokens: torch.Tensor, state: torch.Tensor = None, embodiment_id: torch.LongTensor = None, action_mask: torch.Tensor = None, 
-                   init_noise: torch.Tensor = None):
+    def eval_velocity(self, action, t_val, context_tokens, embodiment_id, action_mask_seq, per_action_dim):
+        """
+        [新增辅助函数] 将原 get_action 循环中的模型前向推理逻辑剥离出来。
+        用于计算给定动作和时间点下的速度场 v(x, t)。
+        """
+        B = action.shape[0]
+        device = action.device
+        
+        # [cite_start]1. 时间编码 (对应原代码 [cite: 111-112])
+        # 将 t [0, 1] 映射到 time index [0, 1000]
+        time_index = int(t_val * 1000)
+        time_index = min(time_index, 999) 
+        
+        # [1, embed_dim] -> [B, embed_dim]
+        time_emb = self.time_pos_enc(1000)[:, time_index, :].to(device).squeeze(0)
+        time_emb = time_emb.unsqueeze(0).repeat(B, 1)
 
-        # print(f"action_mask shape: {action_mask.shape if action_mask is not None else 'None'}")
-        # print(f"one sample action_mask: {action_mask[0] if action_mask is not None else 'None'}")
-
-        B = fused_tokens.size(0)
-        device = fused_tokens.device
-        if embodiment_id is None:
-            embodiment_id = torch.zeros(B, dtype=torch.long, device=device)
-
-        # ViT patch tokens [batch,VLM token length 1024,emb dim 896]
-        context_tokens = fused_tokens
-        if state is not None and self.state_encoder is not None:
-            # state emb:[batch,1,emb dim]
-            state_emb = self.state_encoder(state, embodiment_id).unsqueeze(1) 
-            context_tokens = torch.cat([context_tokens, state_emb], dim=1)
-
-        action_dim_total = getattr(self.config, "action_dim", None)
-        if action_dim_total is None:
-            action_dim_total = self.action_dim
-       
-        if self.horizon > 1:
-            per_action_dim = getattr(self.config, "per_action_dim", action_dim_total // self.horizon)
-        else:
-            per_action_dim = action_dim_total
-
-        if init_noise is not None: # action [B, action_dim * horizon]
-            action = init_noise.to(device)
-        else:
-            action = (torch.rand(B, action_dim_total, device=device) * 2 - 1)
-
+        # [cite_start]2. 动作序列维度调整 (对应原代码 [cite: 119])
         if self.horizon > 1:
             action_seq = action.view(B, self.horizon, per_action_dim)
         else:
             action_seq = action.view(B, 1, per_action_dim)
 
-        action_mask = action_mask.view(B, 1, per_action_dim).repeat(1,self.horizon,1)
-
-        # print(f"action_mask: {action_mask}")
-        # print(f"one sample action_mask: {action_mask[0]}")
-
-        if action_mask is not None:
-            action_mask = action_mask.to(dtype=action_seq.dtype, device=action_seq.device)
-            assert action_mask.shape == action_seq.shape, f"action_mask shape {action_mask.shape} != noise shape {action_seq.shape}"
-            action_seq = action_seq * action_mask
+        # [cite_start]3. 动作编码 (对应原代码 [cite: 112-113])
+        if self.horizon > 1 and self.action_encoder is not None:
+            # 严格应用 mask
+            action_seq = action_seq * action_mask_seq
+            action_tokens = self.action_encoder(action_seq, embodiment_id)
         else:
-            raise ValueError("action_mask must be provided for inference with flow matching.")
-        # print(f"action shape: {action_seq.shape}")
-        # print(f"one sample action: {action_seq[0]}")
-
-        N = int(getattr(self.config, "num_inference_timesteps", 32))
-        dt = 1.0 / N
-        for i in range(N):
-            t = i / N 
-
-            time_index = int(t * 1000)
-            time_emb = self.time_pos_enc(1000)[:, time_index, :].to(device).squeeze(0)  
-            time_emb = time_emb.unsqueeze(0).repeat(B, 1)  
-
-            if self.horizon > 1 and self.action_encoder is not None:
-                action_seq = action_seq * action_mask
-                action_tokens = self.action_encoder(action_seq, embodiment_id) 
+            # 单步动作的线性投影 (Lazy init)
+            if hasattr(self, "single_action_proj"):
+                action_tokens = self.single_action_proj(action_seq)
             else:
-                if hasattr(self, "single_action_proj"):
-                    action_tokens = self.single_action_proj(action_seq)  
-                else:
-                    self.single_action_proj = nn.Linear(per_action_dim, self.embed_dim).to(device)
-                    action_tokens = self.single_action_proj(action_seq)
+                self.single_action_proj = nn.Linear(per_action_dim, self.embed_dim).to(device)
+                action_tokens = self.single_action_proj(action_seq)
 
-            x = action_tokens
-            for block in self.transformer_blocks:
-                x = block(x, context_tokens, time_emb)
-            x = self.norm_out(x)
+        # [cite_start]4. Transformer 主干 (对应原代码 [cite: 114])
+        x = action_tokens
+        for block in self.transformer_blocks:
+            x = block(x, context_tokens, time_emb)
+        x = self.norm_out(x)
 
-            if self.horizon > 1:
-                x_flat = x.reshape(B, -1)
-                if hasattr(self, "seq_pool_proj"):
-                    x_pooled = self.seq_pool_proj(x_flat)
-                else:
-                    self.seq_pool_proj = nn.Linear(self.horizon * self.embed_dim, self.embed_dim).to(device)
-                    x_pooled = self.seq_pool_proj(x_flat)
+        # [cite_start]5. 池化与预测 (对应原代码 [cite: 115-116])
+        if self.horizon > 1:
+            x_flat = x.reshape(B, -1)
+            if hasattr(self, "seq_pool_proj"):
+                x_pooled = self.seq_pool_proj(x_flat)
             else:
-                x_pooled = x.squeeze(1)
-         
-            pred = self.mlp_head(x_pooled, embodiment_id)  
-  
-            action = action + dt * pred
-          
-            if self.horizon > 1:
-                action_seq = action.view(B, self.horizon, per_action_dim)
+                self.seq_pool_proj = nn.Linear(self.horizon * self.embed_dim, self.embed_dim).to(device)
+                x_pooled = self.seq_pool_proj(x_flat)
+        else:
+            x_pooled = x.squeeze(1)
+
+        # 输出速度预测
+        pred_velocity = self.mlp_head(x_pooled, embodiment_id)
+        return pred_velocity
+
+    def get_action(self, fused_tokens: torch.Tensor, state: torch.Tensor = None, 
+                   embodiment_id: torch.LongTensor = None, action_mask: torch.Tensor = None, 
+                   init_noise: torch.Tensor = None): 
+        
+        B = fused_tokens.size(0)
+        device = fused_tokens.device
+        if embodiment_id is None: embodiment_id = torch.zeros(B, dtype=torch.long, device=device)
+        context_tokens = fused_tokens
+        if state is not None and self.state_encoder is not None:
+            state_emb = self.state_encoder(state, embodiment_id).unsqueeze(1)
+            context_tokens = torch.cat([context_tokens, state_emb], dim=1)
+            
+        action_dim_total = getattr(self.config, "action_dim", self.action_dim)
+        if self.horizon > 1: per_action_dim = getattr(self.config, "per_action_dim", action_dim_total // self.horizon)
+        else: per_action_dim = action_dim_total
+        
+        if init_noise is not None: action = init_noise.to(device)
+        else: action = (torch.rand(B, action_dim_total, device=device) * 2 - 1)
+        
+        if action_mask is not None:
+            action_mask_seq = action_mask.view(B, 1, per_action_dim).repeat(1, self.horizon, 1)
+            action_mask_seq = action_mask_seq.to(dtype=action.dtype, device=device)
+
+        if not hasattr(self, "single_action_proj") and (self.horizon == 1 or self.action_encoder is None):
+            self.single_action_proj = nn.Linear(per_action_dim, self.embed_dim).to(device)
+
+        # ================== 诊断增强版自适应求解器 ==================
+        
+        t = 0.0
+        dt = 0.1          
+        step_count = 0
+        
+        # [策略调整]
+        # 1. 基础容忍度调严：从 1e-2 -> 3e-3 (0.3% 误差)。这会把步数从 6 步增加到 10-15 步，但能保证精度。
+        # 2. 末端强制收敛：在 t > 0.8 时，容忍度进一步降低。
+        base_atol = 3e-3   
+        rtol = 3e-3
+        dt_min = 0.01      
+        dt_max = 0.25      # 限制最大步长，防止跳过了关键的非线性区域
+
+        v1 = self.eval_velocity(action, t, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
+
+        # [诊断] 打印表头增加 MaxDim (出问题的维度索引)
+        print(f"\n{'Step':<4} | {'Time':<5} | {'dt':<6} | {'Error':<8} | {'MaxDim':<6} | {'Status'}")
+
+        while t < 1.0:
+            if t + dt > 1.0: dt = 1.0 - t
+            
+            # --- 动态精度策略 ---
+            # 如果接近终点 (t > 0.8)，我们希望精度极高，防止抓取时手抖
+            # 如果是前期 (t < 0.5)，可以稍微粗糙一点
+            if t > 0.8:
+                current_atol = base_atol * 0.5  # 末端加倍严格 (1.5e-3)
             else:
-                action_seq = action.view(B, 1, per_action_dim)
-      
+                current_atol = base_atol
+
+            # 1. Euler
+            x_euler = action + v1 * dt
+            
+            # 2. Heun Corrector
+            v2 = self.eval_velocity(x_euler, t + dt, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
+            x_heun = action + 0.5 * dt * (v1 + v2)
+            
+            # [诊断] 计算逐维度的误差
+            # error_dims: [Batch, ActionDim] -> 取 Batch max -> [ActionDim]
+            error_dims = torch.abs(x_heun - x_euler).max(dim=0).values
+            
+            # 找到误差最大的那个维度索引
+            max_err_val, max_err_idx = torch.max(error_dims, dim=0)
+            max_err_val = max_err_val.item()
+            max_err_idx = max_err_idx.item()
+            
+            # 自适应缩放
+            current_abs_max = torch.max(torch.abs(x_heun)).item()
+            tolerance = current_atol + rtol * current_abs_max
+            
+            if max_err_val > 0:
+                scale = 0.9 * (tolerance / max_err_val) ** 0.5
+            else:
+                scale = 2.0
+
+            # 决策
+            if max_err_val < tolerance or dt <= dt_min:
+                # === ACCEPT ===
+                action = x_heun
+                t += dt
+                v1 = v2 
+                print(f"{step_count:<4} | {t:<5.2f} | {dt:<6.3f} | {max_err_val:<8.5f} | {max_err_idx:<6} | ACC")
+                step_count += 1
+                dt = min(dt * scale, dt_max)
+                if abs(t - 1.0) < 1e-5: break
+            else:
+                # === REJECT ===
+                old_dt = dt
+                dt = max(dt * scale, dt_min)
+                print(f"{'REJ':<4} | {t:<5.2f} | {old_dt:<6.3f}->{dt:<6.3f} | {max_err_val:<8.5f} | {max_err_idx:<6} | RETRY")
+        
+        print(f"[DiagSolver] Total Steps: {step_count}")
         return action
-
     @property
     def device(self):
         return next(self.parameters()).device
