@@ -196,7 +196,13 @@ async def evo1_infer(ws, img_bgr: np.ndarray, state_vec: List[float], prompt: Op
     actions = np.asarray(resp_data["action"], dtype=np.float32)
     latency = resp_data["latency"]
     
-    return actions, latency
+    # --- ADD THESE LINES ---
+    # Extract the dynamic inference metrics sent by the server
+    steps = resp_data.get("steps", 0)
+    sim = resp_data.get("sim", 0.0)
+    mag = resp_data.get("mag", 0.0)
+    
+    return actions, latency, steps, sim, mag
 
 
 def save_sent_bgr_frame(img_bgr: np.ndarray, ep_num: int, idx: int, slug: str, step: Optional[int] = None):
@@ -304,7 +310,6 @@ async def eval_mt50_with_groups(server_url: str,
     # 2) Load ordered idx list & groups
     ordered_indices, groups, idx_to_slug = load_order_and_groups(total_envs)
     ordered_indices = [i for i in ordered_indices if 0 <= i < total_envs]
-
     
     if TARGET_LEVEL.lower() != "all":
         allowed_slugs = groups.get(TARGET_LEVEL.lower(), set())
@@ -329,6 +334,10 @@ async def eval_mt50_with_groups(server_url: str,
 
             task_inference_latency_ms = 0.0
             task_inference_steps = 0
+            
+            stats_steps = []  # 记录每一帧走了几步
+            stats_sims = []   # 记录每一帧的相似度
+            stats_mags = []   # 记录每一帧的速度比
 
             gname_for_task = None
             for gname in group_trials.keys():
@@ -378,8 +387,13 @@ async def eval_mt50_with_groups(server_url: str,
                         saved_this_episode = True
 
                     state_vec = obs_to_state(obs)
-                  
-                    actions, latency_ms = await evo1_infer(ws, img_bgr, state_vec, prompt=task_prompt)
+                    
+                    actions, latency_ms, step_count, sim_val, mag_val = await evo1_infer(ws, img_bgr, state_vec, prompt=task_prompt)
+                    
+                    stats_steps.append(step_count)
+                    stats_sims.append(sim_val)
+                    stats_mags.append(mag_val)
+
                     total_inference_latency_ms += latency_ms
                     total_inference_steps += 1
                     task_inference_latency_ms += latency_ms
@@ -406,7 +420,7 @@ async def eval_mt50_with_groups(server_url: str,
                     final_frame = render_single_bgr(sub)
                     write_video(video_writer, final_frame)
                     save_episode_video(video_writer, video_name, idx, slug, ep + 1)
-                
+            
             s = success_counts[idx]
             t = trials_counts[idx]
             task_rate = s / max(1, t)
@@ -415,10 +429,16 @@ async def eval_mt50_with_groups(server_url: str,
             if task_inference_steps > 0:
                 avg_task_lat = task_inference_latency_ms / task_inference_steps
             
+            avg_diff_steps = sum(stats_steps) / len(stats_steps) if stats_steps else 0
+            avg_sim = sum(stats_sims) / len(stats_sims) if stats_sims else 0
+            min_sim = min(stats_sims) if stats_sims else 0
+            avg_mag = sum(stats_mags) / len(stats_mags) if stats_mags else 0
+            
             msg = (f"[Task {idx} {slug}] {task_prompt} finished {num_eval_episodes} episodes -> "
-                   f"success_rate={task_rate:.3f}  latency={avg_task_lat:.2f}ms (s={s}, t={t})")
+                   f"success_rate={task_rate:.3f}  latency={avg_task_lat:.2f}ms "
+                   f"steps={avg_diff_steps:.1f}  sim_avg={avg_sim:.4f}  sim_min={min_sim:.4f}  mag_avg={avg_mag:.4f} "
+                   f"(s={s}, t={t})")
             log_write(msg)
-            # ============================================
 
     envs.close()
 
@@ -442,7 +462,6 @@ async def eval_mt50_with_groups(server_url: str,
         avg_latency = total_inference_latency_ms / total_inference_steps
 
     return per_task, per_group, overall, avg_latency
-
 
 # ---------------- Entrypoint ----------------
 async def _amain(target_url: str):

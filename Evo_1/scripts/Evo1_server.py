@@ -116,7 +116,7 @@ def infer_from_json_dict(data: dict, model, normalizer):
     # print(f"action_mask,{action_mask}")
     
     with torch.no_grad() and torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-        action_raw, latency = model.run_inference(
+        action_raw, latency, metadata = model.run_inference(
             images=images,
             image_mask=image_mask,
             prompt=prompt,
@@ -129,7 +129,10 @@ def infer_from_json_dict(data: dict, model, normalizer):
         
         return {
             "action": action_denorm.cpu().numpy().tolist(),
-            "latency": latency
+            "latency": latency,
+            "steps": metadata.get("steps", 0),
+            "sim": metadata.get("sim", 0.0),
+            "mag": metadata.get("mag", 0.0)
         }
 
 

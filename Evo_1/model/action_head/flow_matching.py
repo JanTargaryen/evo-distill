@@ -364,7 +364,7 @@ class FlowmatchingActionHead(nn.Module):
 
     def get_action(self, fused_tokens: torch.Tensor, state: torch.Tensor = None, 
                    embodiment_id: torch.LongTensor = None, action_mask: torch.Tensor = None, 
-                   init_noise: torch.Tensor = None): 
+                   init_noise: torch.Tensor = None, verbose: bool = False):
         
         B = fused_tokens.size(0)
         device = fused_tokens.device
@@ -388,79 +388,69 @@ class FlowmatchingActionHead(nn.Module):
         if not hasattr(self, "single_action_proj") and (self.horizon == 1 or self.action_encoder is None):
             self.single_action_proj = nn.Linear(per_action_dim, self.embed_dim).to(device)
 
-        # ================== 诊断增强版自适应求解器 ==================
+        # ================== 2. 分级动态映射求解器 (带透视) ==================
         
+        dt_probe = 0.5 
         t = 0.0
-        dt = 0.1          
-        step_count = 0
         
-        # [策略调整]
-        # 1. 基础容忍度调严：从 1e-2 -> 3e-3 (0.3% 误差)。这会把步数从 6 步增加到 10-15 步，但能保证精度。
-        # 2. 末端强制收敛：在 t > 0.8 时，容忍度进一步降低。
-        base_atol = 3e-3   
-        rtol = 3e-3
-        dt_min = 0.01      
-        dt_max = 0.25      # 限制最大步长，防止跳过了关键的非线性区域
+        # 1. 计算 v0
+        v_start = self.eval_velocity(action, t, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
+        
+        # 2. 走到中点
+        x_mid = action + v_start * dt_probe
+        
+        # 3. 计算 v_mid
+        v_mid = self.eval_velocity(x_mid, t + dt_probe, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
+        
+        # 4. 计算指标
+        flat_v_start = v_start.view(B, -1)
+        flat_v_mid = v_mid.view(B, -1)
+        
+        # A. 方向一致性 (Sim) -> 决策依据
+        cos_sim = F.cosine_similarity(flat_v_start, flat_v_mid, dim=1)
+        sim_score = cos_sim.min().item()
 
-        v1 = self.eval_velocity(action, t, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
+        # B. [补回] 速度模长一致性 (Mag) -> 仅用于记录，不参与决策
+        mag_start = flat_v_start.norm(dim=1)
+        mag_mid = flat_v_mid.norm(dim=1)
+        # 计算比率：min / max，值域 [0, 1]
+        mag_ratio = torch.minimum(mag_start, mag_mid) / (torch.maximum(mag_start, mag_mid) + 1e-6)
+        mag_score = mag_ratio.min().item()
 
-        # [诊断] 打印表头增加 MaxDim (出问题的维度索引)
-        print(f"\n{'Step':<4} | {'Time':<5} | {'dt':<6} | {'Error':<8} | {'MaxDim':<6} | {'Status'}")
+        # [决策逻辑] 只看 Sim，忽略 Mag
+        if sim_score > 0.992:
+            target_steps = 2
+        elif sim_score > 0.985:
+            target_steps = 4
+        elif sim_score > 0.975:
+            target_steps = 6
+        else:
+            target_steps = 8
 
-        while t < 1.0:
-            if t + dt > 1.0: dt = 1.0 - t
-            
-            # --- 动态精度策略 ---
-            # 如果接近终点 (t > 0.8)，我们希望精度极高，防止抓取时手抖
-            # 如果是前期 (t < 0.5)，可以稍微粗糙一点
-            if t > 0.8:
-                current_atol = base_atol * 0.5  # 末端加倍严格 (1.5e-3)
-            else:
-                current_atol = base_atol
+        if verbose:
+            print(f"[Dynamic] Sim: {sim_score:.5f} (Mag: {mag_score:.4f}) -> Steps: {target_steps}")
 
-            # 1. Euler
-            x_euler = action + v1 * dt
-            
-            # 2. Heun Corrector
-            v2 = self.eval_velocity(x_euler, t + dt, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
-            x_heun = action + 0.5 * dt * (v1 + v2)
-            
-            # [诊断] 计算逐维度的误差
-            # error_dims: [Batch, ActionDim] -> 取 Batch max -> [ActionDim]
-            error_dims = torch.abs(x_heun - x_euler).max(dim=0).values
-            
-            # 找到误差最大的那个维度索引
-            max_err_val, max_err_idx = torch.max(error_dims, dim=0)
-            max_err_val = max_err_val.item()
-            max_err_idx = max_err_idx.item()
-            
-            # 自适应缩放
-            current_abs_max = torch.max(torch.abs(x_heun)).item()
-            tolerance = current_atol + rtol * current_abs_max
-            
-            if max_err_val > 0:
-                scale = 0.9 * (tolerance / max_err_val) ** 0.5
-            else:
-                scale = 2.0
-
-            # 决策
-            if max_err_val < tolerance or dt <= dt_min:
-                # === ACCEPT ===
-                action = x_heun
+        # --- 执行阶段 ---
+        
+        if target_steps == 2:
+            action = x_mid + v_mid * dt_probe
+        else:
+            dt = 1.0 / target_steps
+            action = action + v_start * dt
+            t += dt
+            for _ in range(target_steps - 1):
+                v = self.eval_velocity(action, t, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
+                action = action + v * dt
                 t += dt
-                v1 = v2 
-                print(f"{step_count:<4} | {t:<5.2f} | {dt:<6.3f} | {max_err_val:<8.5f} | {max_err_idx:<6} | ACC")
-                step_count += 1
-                dt = min(dt * scale, dt_max)
-                if abs(t - 1.0) < 1e-5: break
-            else:
-                # === REJECT ===
-                old_dt = dt
-                dt = max(dt * scale, dt_min)
-                print(f"{'REJ':<4} | {t:<5.2f} | {old_dt:<6.3f}->{dt:<6.3f} | {max_err_val:<8.5f} | {max_err_idx:<6} | RETRY")
+
+        # [返回元数据] 这里的 mag_score 现在是真实计算出来的了
+        metadata = {
+            "steps": target_steps,
+            "sim": sim_score,
+            "mag": mag_score 
+        }
         
-        print(f"[DiagSolver] Total Steps: {step_count}")
-        return action
+        return action, metadata
     @property
     def device(self):
         return next(self.parameters()).device

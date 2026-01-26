@@ -96,12 +96,11 @@ class EVO1(nn.Module):
         actions_gt: torch.Tensor = None,
         action_mask: torch.Tensor = None,
         embodiment_ids: torch.Tensor = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ):
         if actions_gt is None:
             return self.action_head.get_action(fused_tokens, state=state, action_mask=action_mask, embodiment_id=embodiment_ids)
         else:
             return self.action_head(fused_tokens, state=state, actions_gt=actions_gt, action_mask=action_mask, embodiment_id=embodiment_ids)
-
 
     @torch.no_grad()
     def run_inference(
@@ -119,16 +118,16 @@ class EVO1(nn.Module):
                         image_mask=image_mask,
                         prompt=prompt,
                         return_cls_only=return_cls_only
-                        
                     )
 
         state_tensor = self.prepare_state(state_input)  
-        action = self.predict_action(fused_tokens, state_tensor, action_mask=action_mask)
-        t1 = time.time()
         
+        action, metadata = self.predict_action(fused_tokens, state_tensor, action_mask=action_mask)
+        
+        t1 = time.time()
         latency = (t1 - t0) * 1000
         
-        return action, latency
+        return action, latency, metadata
     
 
     def forward(self, fused_tokens, state=None, actions_gt=None, action_mask=None, embodiment_ids=None):
