@@ -59,7 +59,8 @@ FALLBACK_USE_FIRST_N: Optional[int] = 5
 FALLBACK_IDX_LIST: Optional[List[int]] = None
 
 # Prompt source
-TASKS_JSONL_PATH = "tasks.jsonl"         
+TASKS_JSONL_PATH = "tasks.jsonl"    
+FIXED_STEPS = 1
 # ==================================================================
 
 # Headless GL by default; switch to 'glfw' on a desktop if you want
@@ -185,7 +186,8 @@ async def evo1_infer(ws, img_bgr: np.ndarray, state_vec: List[float], prompt: Op
                   encode_image_uint8_list(dummy_img),
                   encode_image_uint8_list(dummy_img)],
         "state": state_vec,
-        "prompt": prompt,              
+        "prompt": prompt,    
+        "steps": FIXED_STEPS,          
         "image_mask": [1, 0, 0],
         "action_mask": [1, 1, 1, 1] + [0]*20,
     }
@@ -275,6 +277,7 @@ def load_order_and_groups(total_envs: int):
         idx_to_slug = {int(k): v for k, v in data["idx_to_slug"].items()}
         print(f"[INFO] Loaded order from {ORDER_JSON_PATH} (len={len(ordered_indices)})")
         log_write(f"[INFO] Metaworld Evaluation Begins ...")
+        log_write(f"fix_steps: {FIXED_STEPS}")
         return ordered_indices, groups, idx_to_slug
 
   

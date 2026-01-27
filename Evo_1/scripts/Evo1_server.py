@@ -114,14 +114,15 @@ def infer_from_json_dict(data: dict, model, normalizer):
 
     # print(f"image_mask,{image_mask}")
     # print(f"action_mask,{action_mask}")
-    
+    steps = data.get("steps", None)
     with torch.no_grad() and torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
         action_raw, latency, metadata = model.run_inference(
             images=images,
             image_mask=image_mask,
             prompt=prompt,
             state_input=norm_state,
-            action_mask=action_mask
+            action_mask=action_mask,
+            steps=steps
         )
 
         action_raw = action_raw.reshape(1, -1, 24)

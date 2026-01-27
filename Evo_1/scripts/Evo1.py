@@ -96,11 +96,12 @@ class EVO1(nn.Module):
         actions_gt: torch.Tensor = None,
         action_mask: torch.Tensor = None,
         embodiment_ids: torch.Tensor = None,
+        steps: int = None
     ):
         if actions_gt is None:
-            return self.action_head.get_action(fused_tokens, state=state, action_mask=action_mask, embodiment_id=embodiment_ids)
+            return self.action_head.get_action(fused_tokens, state=state, action_mask=action_mask, embodiment_id=embodiment_ids, steps=steps)
         else:
-            return self.action_head(fused_tokens, state=state, actions_gt=actions_gt, action_mask=action_mask, embodiment_id=embodiment_ids)
+            return self.action_head(fused_tokens, state=state, actions_gt=actions_gt, action_mask=action_mask, embodiment_id=embodiment_ids, steps=steps)
 
     @torch.no_grad()
     def run_inference(
@@ -110,7 +111,8 @@ class EVO1(nn.Module):
         prompt: str,
         state_input: Union[list, torch.Tensor],
         return_cls_only: Union[bool, None] = None,
-        action_mask: Union[torch.Tensor, None] = None
+        action_mask: Union[torch.Tensor, None] = None,
+        steps: int = None
     ):
         t0 = time.time()
         fused_tokens = self.get_vl_embeddings(
@@ -122,7 +124,7 @@ class EVO1(nn.Module):
 
         state_tensor = self.prepare_state(state_input)  
         
-        action, metadata = self.predict_action(fused_tokens, state_tensor, action_mask=action_mask)
+        action, metadata = self.predict_action(fused_tokens, state_tensor, action_mask=action_mask,steps=steps)
         
         t1 = time.time()
         latency = (t1 - t0) * 1000

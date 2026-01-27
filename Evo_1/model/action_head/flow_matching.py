@@ -313,41 +313,32 @@ class FlowmatchingActionHead(nn.Module):
         B = action.shape[0]
         device = action.device
         
-        # [cite_start]1. 时间编码 (对应原代码 [cite: 111-112])
-        # 将 t [0, 1] 映射到 time index [0, 1000]
         time_index = int(t_val * 1000)
         time_index = min(time_index, 999) 
         
-        # [1, embed_dim] -> [B, embed_dim]
         time_emb = self.time_pos_enc(1000)[:, time_index, :].to(device).squeeze(0)
         time_emb = time_emb.unsqueeze(0).repeat(B, 1)
 
-        # [cite_start]2. 动作序列维度调整 (对应原代码 [cite: 119])
         if self.horizon > 1:
             action_seq = action.view(B, self.horizon, per_action_dim)
         else:
             action_seq = action.view(B, 1, per_action_dim)
 
-        # [cite_start]3. 动作编码 (对应原代码 [cite: 112-113])
         if self.horizon > 1 and self.action_encoder is not None:
-            # 严格应用 mask
             action_seq = action_seq * action_mask_seq
             action_tokens = self.action_encoder(action_seq, embodiment_id)
         else:
-            # 单步动作的线性投影 (Lazy init)
             if hasattr(self, "single_action_proj"):
                 action_tokens = self.single_action_proj(action_seq)
             else:
                 self.single_action_proj = nn.Linear(per_action_dim, self.embed_dim).to(device)
                 action_tokens = self.single_action_proj(action_seq)
 
-        # [cite_start]4. Transformer 主干 (对应原代码 [cite: 114])
         x = action_tokens
         for block in self.transformer_blocks:
             x = block(x, context_tokens, time_emb)
         x = self.norm_out(x)
 
-        # [cite_start]5. 池化与预测 (对应原代码 [cite: 115-116])
         if self.horizon > 1:
             x_flat = x.reshape(B, -1)
             if hasattr(self, "seq_pool_proj"):
@@ -358,13 +349,12 @@ class FlowmatchingActionHead(nn.Module):
         else:
             x_pooled = x.squeeze(1)
 
-        # 输出速度预测
         pred_velocity = self.mlp_head(x_pooled, embodiment_id)
         return pred_velocity
 
     def get_action(self, fused_tokens: torch.Tensor, state: torch.Tensor = None, 
                    embodiment_id: torch.LongTensor = None, action_mask: torch.Tensor = None, 
-                   init_noise: torch.Tensor = None, verbose: bool = False):
+                   init_noise: torch.Tensor = None, verbose: bool = False, steps: int = None):
         
         B = fused_tokens.size(0)
         device = fused_tokens.device
@@ -388,51 +378,42 @@ class FlowmatchingActionHead(nn.Module):
         if not hasattr(self, "single_action_proj") and (self.horizon == 1 or self.action_encoder is None):
             self.single_action_proj = nn.Linear(per_action_dim, self.embed_dim).to(device)
 
-        # ================== 2. 分级动态映射求解器 (带透视) ==================
-        
-        dt_probe = 0.5 
-        t = 0.0
-        
-        # 1. 计算 v0
-        v_start = self.eval_velocity(action, t, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
-        
-        # 2. 走到中点
-        x_mid = action + v_start * dt_probe
-        
-        # 3. 计算 v_mid
-        v_mid = self.eval_velocity(x_mid, t + dt_probe, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
-        
-        # 4. 计算指标
-        flat_v_start = v_start.view(B, -1)
-        flat_v_mid = v_mid.view(B, -1)
-        
-        # A. 方向一致性 (Sim) -> 决策依据
-        cos_sim = F.cosine_similarity(flat_v_start, flat_v_mid, dim=1)
-        sim_score = cos_sim.min().item()
+        if steps is None:
+            dt_probe = 0.5 
+            t = 0.0
+            
+            v_start = self.eval_velocity(action, t, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
+            x_mid = action + v_start * dt_probe
+            v_mid = self.eval_velocity(x_mid, t + dt_probe, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
+            
+            flat_v_start = v_start.view(B, -1)
+            flat_v_mid = v_mid.view(B, -1)
+            cos_sim = F.cosine_similarity(flat_v_start, flat_v_mid, dim=1)
+            sim_score = cos_sim.min().item()
 
-        # B. [补回] 速度模长一致性 (Mag) -> 仅用于记录，不参与决策
-        mag_start = flat_v_start.norm(dim=1)
-        mag_mid = flat_v_mid.norm(dim=1)
-        # 计算比率：min / max，值域 [0, 1]
-        mag_ratio = torch.minimum(mag_start, mag_mid) / (torch.maximum(mag_start, mag_mid) + 1e-6)
-        mag_score = mag_ratio.min().item()
+            mag_start = flat_v_start.norm(dim=1)
+            mag_mid = flat_v_mid.norm(dim=1)
+            mag_ratio = torch.minimum(mag_start, mag_mid) / (torch.maximum(mag_start, mag_mid) + 1e-6)
+            mag_score = mag_ratio.min().item()
 
-        # [决策逻辑] 只看 Sim，忽略 Mag
-        if sim_score > 0.992:
-            target_steps = 2
-        elif sim_score > 0.985:
-            target_steps = 4
-        elif sim_score > 0.975:
-            target_steps = 6
+            if sim_score > 0.992: target_steps = 2
+            elif sim_score > 0.985: target_steps = 4
+            elif sim_score > 0.975: target_steps = 6
+            else: target_steps = 8
+
+            if verbose:
+                print(f"[Dynamic] Sim: {sim_score:.5f} -> Steps: {target_steps}")
+
         else:
-            target_steps = 8
+            target_steps = steps
+            t = 0.0
+            v_start = self.eval_velocity(action, t, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
+            
+            sim_score = 0.0
+            mag_score = 0.0
 
-        if verbose:
-            print(f"[Dynamic] Sim: {sim_score:.5f} (Mag: {mag_score:.4f}) -> Steps: {target_steps}")
-
-        # --- 执行阶段 ---
         
-        if target_steps == 2:
+        if steps is None and target_steps == 2:
             action = x_mid + v_mid * dt_probe
         else:
             dt = 1.0 / target_steps
@@ -443,7 +424,6 @@ class FlowmatchingActionHead(nn.Module):
                 action = action + v * dt
                 t += dt
 
-        # [返回元数据] 这里的 mag_score 现在是真实计算出来的了
         metadata = {
             "steps": target_steps,
             "sim": sim_score,

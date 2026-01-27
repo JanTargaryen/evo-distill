@@ -8,7 +8,6 @@ def parse_log_file(file_path):
     latencies = []
     success_rates = []
     
-    # 正则匹配 latency=123.45ms 和 success_rate=1.000
     latency_pattern = re.compile(r'latency=([\d\.]+)ms')
     success_pattern = re.compile(r'success_rate=([\d\.]+)')
     
@@ -46,14 +45,11 @@ def main():
     parser.add_argument("path", type=str, help="Path to a log file or a directory containing log files")
     args = parser.parse_args()
 
-    # 确定要处理的文件列表
     files = []
     if os.path.isfile(args.path):
         files.append(args.path)
     elif os.path.isdir(args.path):
-        # 递归查找所有 .txt 文件
         files = glob.glob(os.path.join(args.path, "**/*.txt"), recursive=True)
-        # 也可以包含 .log 文件
         files += glob.glob(os.path.join(args.path, "**/*.log"), recursive=True)
     else:
         print(f"Invalid path: {args.path}")
@@ -68,10 +64,6 @@ def main():
         stats = parse_log_file(file_path)
         if stats:
             print(f"{stats['file']:<40} | {stats['count']:<5} | {stats['avg_latency']:.2f} ms{'':<8} | {stats['avg_success']:.3f}")
-            # 保存该文件的平均值，用于计算总平均
-            # 注意：这里我们应该保存*加权*平均，或者直接把所有raw latency存起来算总平均
-            # 简单起见，这里重新解析一次或者假设每个任务权重一样。
-            # 为了精确，我们记录 (sum, count)
             all_latencies_summary.append((stats['avg_latency'] * stats['count'], stats['count']))
 
     print("-" * 85)
