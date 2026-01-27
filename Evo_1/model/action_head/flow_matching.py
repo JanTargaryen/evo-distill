@@ -217,10 +217,10 @@ class FlowmatchingActionHead(nn.Module):
 
     def forward(self, fused_tokens: torch.Tensor, state: torch.Tensor = None,
                 actions_gt: torch.Tensor = None, embodiment_id: torch.LongTensor = None, 
-                state_mask: torch.Tensor = None, action_mask: torch.Tensor = None,
-                z0: torch.Tensor = None, z1: torch.Tensor = None, is_reflow: bool = False):  # start and end actions for reflow
+                action_mask: torch.Tensor = None,
+                ): 
 
-        if actions_gt is None and not is_reflow:
+        if actions_gt is None:
             return self.get_action(fused_tokens, state=state, embodiment_id=embodiment_id)
         B = fused_tokens.size(0)
         device = fused_tokens.device
@@ -234,51 +234,31 @@ class FlowmatchingActionHead(nn.Module):
             state_emb = state_emb.unsqueeze(1) 
             context_tokens = torch.cat([context_tokens, state_emb], dim=1) 
 
-        if is_reflow: # is_reflow: target is velocity z1-z0
-            if action_mask is not None:
-                action_mask = action_mask.to(dtype=z0.dtype, device=z0.device)
-                z0 = z0 * action_mask
-                z1 = z1 * action_mask
-            t_float = torch.rand(B, device=device)
-            time_index = (t_float * 1000).long().clamp(max=999)
-            time_emb = self.time_pos_enc(1000)[:, time_index, :].squeeze(0)
+        # Original Flow Matching logic
+        t = torch.distributions.Beta(2, 2).sample((B,)).clamp(0.02, 0.98).to(device).to(dtype=self.dtype) # Beta distribution , trick
+        time_index = (t * 1000).long()  
+        time_emb = self.time_pos_enc(1000)[:, time_index, :].squeeze(0) 
 
-            t = t_float.to(dtype=self.dtype)  # to bfloat16
+        actions_gt_seq = actions_gt  
+        noise = torch.rand_like(actions_gt) * 2 - 1   # rand_like * 2 - 1 : [0,1] -> [-1,1]
 
-            if self.horizon > 1:
-                t_expand = t.view(B, 1, 1)
-            else:
-                t_expand = t.view(B, 1)
-            
-            action_intermediate_seq = t_expand * z1 + (1 - t_expand) * z0
-            target = z1 - z0 # Target Velocity
+        if action_mask is not None: # action mask: clear abundant 0 padding , avoid model to learn useless pattern
+            action_mask = action_mask.to(dtype=noise.dtype, device=noise.device)
+            assert action_mask.shape == noise.shape, f"action_mask shape {action_mask.shape} != noise shape {noise.shape}"
+            noise = noise * action_mask
 
+        if self.horizon > 1:
+            noise_seq = noise.view(B, self.horizon, self.per_action_dim)
         else:
-            # Original Flow Matching logic
-            t = torch.distributions.Beta(2, 2).sample((B,)).clamp(0.02, 0.98).to(device).to(dtype=self.dtype) # Beta distribution , trick
-            time_index = (t * 1000).long()  
-            time_emb = self.time_pos_enc(1000)[:, time_index, :].squeeze(0) 
+            noise_seq = noise.unsqueeze(1)
 
-            actions_gt_seq = actions_gt  
-            noise = torch.rand_like(actions_gt) * 2 - 1   # rand_like * 2 - 1 : [0,1] -> [-1,1]
-
-            if action_mask is not None: # action mask: clear abundant 0 padding , avoid model to learn useless pattern
-                action_mask = action_mask.to(dtype=noise.dtype, device=noise.device)
-                assert action_mask.shape == noise.shape, f"action_mask shape {action_mask.shape} != noise shape {noise.shape}"
-                noise = noise * action_mask
-
-            if self.horizon > 1:
-                noise_seq = noise.view(B, self.horizon, self.per_action_dim)
-            else:
-                noise_seq = noise.unsqueeze(1)
-
-            if self.horizon > 1:
-                t_broadcast = t.view(B, 1, 1)
-            else:
-                t_broadcast = t.view(B, 1)
-            # (1 - t) * noise + t * actions_gt(ground )
-            action_intermediate_seq = (1 - t_broadcast) * noise_seq + t_broadcast * actions_gt_seq
-            target = noise
+        if self.horizon > 1:
+            t_broadcast = t.view(B, 1, 1)
+        else:
+            t_broadcast = t.view(B, 1)
+        # (1 - t) * noise + t * actions_gt(ground )
+        action_intermediate_seq = (1 - t_broadcast) * noise_seq + t_broadcast * actions_gt_seq
+        
 
         if self.horizon > 1 and self.action_encoder is not None:
             action_tokens = self.action_encoder(action_intermediate_seq, embodiment_id)  
@@ -303,7 +283,7 @@ class FlowmatchingActionHead(nn.Module):
 
         pred_velocity = self.mlp_head(x_pooled, embodiment_id) 
 
-        return pred_velocity, target
+        return pred_velocity, noise
 
     def eval_velocity(self, action, t_val, context_tokens, embodiment_id, action_mask_seq, per_action_dim):
         """
@@ -353,7 +333,7 @@ class FlowmatchingActionHead(nn.Module):
 
     def get_action(self, fused_tokens: torch.Tensor, state: torch.Tensor = None, 
                    embodiment_id: torch.LongTensor = None, action_mask: torch.Tensor = None, 
-                   init_noise: torch.Tensor = None, verbose: bool = False,
+                   verbose: bool = False,
                    steps: int = None):
         
         B = fused_tokens.size(0)
@@ -368,9 +348,10 @@ class FlowmatchingActionHead(nn.Module):
         if self.horizon > 1: per_action_dim = getattr(self.config, "per_action_dim", action_dim_total // self.horizon)
         else: per_action_dim = action_dim_total
         
-        if init_noise is not None: action = init_noise.to(device)
-        else: action = (torch.rand(B, action_dim_total, device=device) * 2 - 1)
+        action = (torch.rand(B, action_dim_total, device=device) * 2 - 1)
         
+        action_mask_seq = None
+
         if action_mask is not None:
             action_mask_seq = action_mask.view(B, 1, per_action_dim).repeat(1, self.horizon, 1)
             action_mask_seq = action_mask_seq.to(dtype=action.dtype, device=device)
