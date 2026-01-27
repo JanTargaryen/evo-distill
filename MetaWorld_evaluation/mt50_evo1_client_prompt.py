@@ -60,7 +60,7 @@ FALLBACK_IDX_LIST: Optional[List[int]] = None
 
 # Prompt source
 TASKS_JSONL_PATH = "tasks.jsonl"    
-FIXED_STEPS = 1
+FIXED_STEPS = None
 # ==================================================================
 
 # Headless GL by default; switch to 'glfw' on a desktop if you want
@@ -437,15 +437,15 @@ async def eval_mt50_with_groups(server_url: str,
             min_sim = min(stats_sims) if stats_sims else 0
             avg_mag = sum(stats_mags) / len(stats_mags) if stats_mags else 0
             
-            msg = (f"[Task {idx} {slug}] {task_prompt} finished {num_eval_episodes} episodes -> "
+            msg = (f"[Task {idx} {slug}]->"
                    f"success_rate={task_rate:.3f}  latency={avg_task_lat:.2f}ms "
                    f"steps={avg_diff_steps:.1f}  sim_avg={avg_sim:.4f}  sim_min={min_sim:.4f}  mag_avg={avg_mag:.4f} "
-                   f"(s={s}, t={t})")
+                   f"(s={s}, t={t})",
+                   f"{task_prompt} finished {num_eval_episodes} episodes")
             log_write(msg)
 
     envs.close()
 
-    # 5) Build metrics (保持不变)
     per_task: Dict[str, float] = {}
     for idx in ordered_indices:
         slug = idx_to_slug.get(idx, f"task-{idx}")

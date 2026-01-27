@@ -307,8 +307,7 @@ class FlowmatchingActionHead(nn.Module):
 
     def eval_velocity(self, action, t_val, context_tokens, embodiment_id, action_mask_seq, per_action_dim):
         """
-        [新增辅助函数] 将原 get_action 循环中的模型前向推理逻辑剥离出来。
-        用于计算给定动作和时间点下的速度场 v(x, t)。
+        calulate v(x, t)
         """
         B = action.shape[0]
         device = action.device
@@ -354,7 +353,8 @@ class FlowmatchingActionHead(nn.Module):
 
     def get_action(self, fused_tokens: torch.Tensor, state: torch.Tensor = None, 
                    embodiment_id: torch.LongTensor = None, action_mask: torch.Tensor = None, 
-                   init_noise: torch.Tensor = None, verbose: bool = False, steps: int = None):
+                   init_noise: torch.Tensor = None, verbose: bool = False,
+                   steps: int = None):
         
         B = fused_tokens.size(0)
         device = fused_tokens.device
@@ -362,7 +362,7 @@ class FlowmatchingActionHead(nn.Module):
         context_tokens = fused_tokens
         if state is not None and self.state_encoder is not None:
             state_emb = self.state_encoder(state, embodiment_id).unsqueeze(1)
-            context_tokens = torch.cat([context_tokens, state_emb], dim=1)
+            context_tokens = torch.cat([context_tokens, state_emb], dim=1) 
             
         action_dim_total = getattr(self.config, "action_dim", self.action_dim)
         if self.horizon > 1: per_action_dim = getattr(self.config, "per_action_dim", action_dim_total // self.horizon)
@@ -378,47 +378,67 @@ class FlowmatchingActionHead(nn.Module):
         if not hasattr(self, "single_action_proj") and (self.horizon == 1 or self.action_encoder is None):
             self.single_action_proj = nn.Linear(per_action_dim, self.embed_dim).to(device)
 
+        # Strategy Selection: Linearity-Aware Quantization (Dynamic) vs Direct Solver (Fixed)
         if steps is None:
+            #  Linearity-Aware Adaptive Sampling ===
+            
             dt_probe = 0.5 
             t = 0.0
             
+            # 1. Lookahead Probe 
             v_start = self.eval_velocity(action, t, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
             x_mid = action + v_start * dt_probe
             v_mid = self.eval_velocity(x_mid, t + dt_probe, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
             
+            # 2. Compute Metrics
             flat_v_start = v_start.view(B, -1)
             flat_v_mid = v_mid.view(B, -1)
+            
+            # Metric: Cosine Similarity (Linearity)
             cos_sim = F.cosine_similarity(flat_v_start, flat_v_mid, dim=1)
             sim_score = cos_sim.min().item()
 
+            # Metric: Magnitude Stability (Optional, for monitoring)
             mag_start = flat_v_start.norm(dim=1)
             mag_mid = flat_v_mid.norm(dim=1)
             mag_ratio = torch.minimum(mag_start, mag_mid) / (torch.maximum(mag_start, mag_mid) + 1e-6)
             mag_score = mag_ratio.min().item()
 
-            if sim_score > 0.992: target_steps = 2
-            elif sim_score > 0.985: target_steps = 4
-            elif sim_score > 0.975: target_steps = 6
-            else: target_steps = 8
+            # 3. Apply Quantization Formula
+            # Formula: N = clip(N_min + 2 * floor((1 - sim) / epsilon), N_min, N_max)
+            # epsilon = 0.008 corresponds to the sensitivity threshold derived from empirical tuning.
+            epsilon = 0.008 
+            curvature = 1.0 - sim_score
+            
+            # Math: map curvature error to step increments
+            raw_steps = 2 + 2 * math.floor(curvature / epsilon)
+            target_steps = int(min(max(raw_steps, 2), 8))
 
             if verbose:
-                print(f"[Dynamic] Sim: {sim_score:.5f} -> Steps: {target_steps}")
+                print(f"[Adaptive] Sim: {sim_score:.4f} (Err: {curvature:.4f}) -> Steps: {target_steps}")
 
         else:
+            # fix steps
             target_steps = steps
             t = 0.0
             v_start = self.eval_velocity(action, t, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
             
+            # Dummy metadata
             sim_score = 0.0
             mag_score = 0.0
 
         
+        # Optimization: If Dynamic Mode selected 2 steps, re-use x_mid/v_mid from the probe phase.
         if steps is None and target_steps == 2:
             action = x_mid + v_mid * dt_probe
         else:
+            # Standard Euler Integration
+            # Note: v_start is already computed in both branches above.
             dt = 1.0 / target_steps
             action = action + v_start * dt
             t += dt
+            
+            # Iterate for remaining steps
             for _ in range(target_steps - 1):
                 v = self.eval_velocity(action, t, context_tokens, embodiment_id, action_mask_seq, per_action_dim)
                 action = action + v * dt
