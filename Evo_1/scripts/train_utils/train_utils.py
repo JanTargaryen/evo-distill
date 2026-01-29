@@ -179,7 +179,7 @@ def evaluate_and_log_metrics(
             
             inference_steps = 10 
             
-            with torch.no_grad():
+            with torch.no_grad(), torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
                 generated_action, _, _ = unwrapped_model.run_inference(
                     images=images_input,
                     image_mask=image_mask_input,

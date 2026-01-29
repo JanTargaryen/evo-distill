@@ -157,13 +157,17 @@ def save_checkpoint(save_dir, step, model_engine, loss, accelerator, config=None
 
     accelerator.wait_for_everyone()
 
-    client_state = {
-        "step": step,
-        "best_loss": loss if isinstance(loss, float) else loss.item(),
-        "config": config,
-    } if accelerator.is_main_process else {} 
-
-    model_engine.save_checkpoint(save_dir, tag=tag, client_state=client_state)
+    # DDP & DeepSpeed  
+    if hasattr(model_engine, "save_checkpoint"):
+        # DeepSpeed 模式
+        client_state = {
+            "step": step,
+            "best_loss": loss if isinstance(loss, float) else loss.item(),
+            "config": config,
+        } if accelerator.is_main_process else {}
+        model_engine.save_checkpoint(save_dir, tag=tag, client_state=client_state)
+    else:
+        accelerator.save_state(checkpoint_dir)
     
     if accelerator.is_main_process:
         if config is not None:
@@ -178,49 +182,54 @@ def save_checkpoint(save_dir, step, model_engine, loss, accelerator, config=None
                 
         checkpoint_meta_path = os.path.join(checkpoint_dir, "checkpoint.json")
         checkpoint_meta = {
-            "type": "ds_model",
+            "type": "ds_model" if hasattr(model_engine, "save_checkpoint") else "ddp_model",
             "version": 0.0,
-            "checkpoints": "mp_rank_00_model_states.pt"
+            "checkpoints": "mp_rank_00_model_states.pt" # 仅作占位，DDP 模式下通常不使用此文件加载
         }
         with open(checkpoint_meta_path, "w") as f:
             json.dump(checkpoint_meta, f, indent=2)
         logging.info(f"[Rank {accelerator.process_index}] Saved checkpoint to {checkpoint_dir}")
 
 def load_checkpoint_with_deepspeed(model_engine, load_dir, accelerator, tag="step_best", load_optimizer_states=True, resume_pretrain=False):
-
-    try:
-        load_path, client_state = model_engine.load_checkpoint(
-            load_dir,
-            tag=tag,
-            load_module_strict=True,
-            load_optimizer_states=load_optimizer_states and not resume_pretrain,
-            load_lr_scheduler_states=load_optimizer_states and not resume_pretrain
-        )
-        if accelerator.is_main_process:
-            logging.info(f"Loaded DeepSpeed checkpoint from {load_dir}/{tag} (including optimizer states)")
-        return client_state.get("step", 0), client_state
-        
-    except Exception as e:
-        if accelerator.is_main_process:
-            logging.warning(f"World size mismatch detected: {str(e)}")
-            logging.warning("Attempting to load only model weights (skipping optimizer states)...")
+    if hasattr(model_engine, "load_checkpoint"):
+        # DeepSpeed 
         try:
             load_path, client_state = model_engine.load_checkpoint(
                 load_dir,
                 tag=tag,
                 load_module_strict=True,
-                load_optimizer_states=False,
-                load_lr_scheduler_states=False
+                load_optimizer_states=load_optimizer_states and not resume_pretrain,
+                load_lr_scheduler_states=load_optimizer_states and not resume_pretrain
             )
             if accelerator.is_main_process:
-                logging.info(f"Loaded DeepSpeed checkpoint from {load_dir}/{tag} (model weights only)")
+                logging.info(f"Loaded DeepSpeed checkpoint from {load_dir}/{tag}")
             return client_state.get("step", 0), client_state
             
-        except Exception as e2:
+        except Exception as e:
             if accelerator.is_main_process:
-                logging.error(f"Failed to load checkpoint even without optimizer states: {str(e2)}")
-            raise RuntimeError(f"Failed to load DeepSpeed checkpoint from {load_dir} with tag {tag}: {str(e2)}")
-    
+                logging.warning(f"DeepSpeed load failed, trying weight only: {str(e)}")
+            try:
+                load_path, client_state = model_engine.load_checkpoint(
+                    load_dir,
+                    tag=tag,
+                    load_module_strict=True,
+                    load_optimizer_states=False,
+                    load_lr_scheduler_states=False
+                )
+                return client_state.get("step", 0), client_state
+            except Exception as e2:
+                raise RuntimeError(f"Failed to load DeepSpeed checkpoint: {str(e2)}")
+    else:
+        # DDP / Accelerate 
+        ckpt_path = os.path.join(load_dir, tag)
+        if accelerator.is_main_process:
+            logging.info(f"Loading Accelerate/DDP checkpoint from {ckpt_path}")
+        
+        try:
+            accelerator.load_state(ckpt_path)
+            return 0, {} 
+        except Exception as e:
+             raise RuntimeError(f"Failed to load DDP checkpoint from {ckpt_path}: {str(e)}")
 # compute and clip gradient
 def get_and_clip_grad_norm(accelerator, model, loss, max_norm: float = 1.0):
 
