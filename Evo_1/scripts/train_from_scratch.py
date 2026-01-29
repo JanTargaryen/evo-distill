@@ -20,17 +20,16 @@ from accelerate import Accelerator, DistributedType
 import json
 import shutil
 from torch.optim import AdamW
-
+from scripts.train_utils.train_utils import(
+    setup_logging,
+    init_swanlab,
+    get_with_warning,
+    log_training_step, 
+    evaluate_and_log_metrics,
+)
 import warnings
 
 accelerator = Accelerator()
-
-def get_with_warning(config: dict, key: str, default):
-    if key in config:
-        return config[key]
-    else:
-        warnings.warn(f"'{key}' not found in config, using default: {default!r}")
-        return default
 
 # read module dict , print which is trainable , which is frozen
 def inspect_named_submodules(module_dict: dict, verbose: bool = True):
@@ -95,51 +94,6 @@ def get_lr_lambda(warmup_steps, total_steps, resume_step=0):
         return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
     return lr_lambda
     
-def setup_logging(log_dir: str) -> str:
-    from datetime import datetime
-    import logging, os
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, f"train_log_{timestamp}.log")
-    if accelerator is None or accelerator.is_main_process:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s [%(levelname)s] %(message)s",
-            handlers=[
-                logging.FileHandler(log_path),
-                logging.StreamHandler()
-            ]
-        )
-        logging.info(f"Logging to: {log_path}")
-    return log_path
-
-def init_wandb(config: dict, accelerator: Accelerator):
-
-    if accelerator.is_main_process:
-        if get_with_warning(config, "disable_wandb", False):
-            os.environ["WANDB_MODE"] = "disabled"
-
-        wandb.init(
-            project=get_with_warning(config, "wandb_project", "default_run"),
-            name=get_with_warning(config, "run_name", "default_run"),
-            config=config,
-            dir=get_with_warning(config, "save_dir", "checkpoints"),
-            mode="offline",
-        )
-
-        wandb.define_metric("step")
-        wandb.define_metric("*", step_metric="step")
-
-def init_swanlab(config: dict, accelerator: Accelerator):
-
-    if accelerator is None or accelerator.is_main_process:
-        swanlab.init(
-            project=config.get("wandb_project", "default_run"),
-            name=config.get("run_name", "default_run"),
-            config=config
-        )
-
 def prepare_dataset(config: dict) -> torch.utils.data.Dataset:
     dataset_type = get_with_warning(config, "dataset_type", "lerobot")
     image_size = get_with_warning(config, "image_size", 448)
@@ -167,7 +121,6 @@ def prepare_dataset(config: dict) -> torch.utils.data.Dataset:
         logging.info(f"Loaded {len(dataset)} samples from {config['data_paths']} ({dataset_type})")
     return dataset
 
-
 def prepare_dataloader(dataset, config: dict) -> DataLoader:
     batch_size = get_with_warning(config, "batch_size", 8)
     num_workers = get_with_warning(config, "num_workers", 8)
@@ -193,26 +146,6 @@ def check_numerical_stability(step: int, **named_tensors) -> bool:
             logging.info(f"[Step {step}] Non-finite detected in {name}")
             return False
     return True
-
-def log_training_step(step, loss, total_norm, clipped_norm, scheduler, dataloader, accelerator):
-    current_epoch = step / len(dataloader)
-    if accelerator is None or accelerator.is_main_process:
-        logging.info(f"Estimated Epoch: {current_epoch:.2f}")
-        logging.info(f"[Step {step}] Loss: {loss.item():.4f}")
-        wandb.log({
-            "step": step,
-            "loss": loss.item(),
-            "current_epoch": current_epoch,
-            "learning_rate": scheduler.get_last_lr()[0],
-            
-        })
-        swanlab.log({
-            "step": step,
-            "loss": loss.item(),
-            "current_epoch": current_epoch,
-            "learning_rate": scheduler.get_last_lr()[0],
-    
-        })
 
 def save_checkpoint(save_dir, step, model_engine, loss, accelerator, config=None, norm_stats=None):
     tag = f"step_{step}"
@@ -287,7 +220,6 @@ def load_checkpoint_with_deepspeed(model_engine, load_dir, accelerator, tag="ste
             if accelerator.is_main_process:
                 logging.error(f"Failed to load checkpoint even without optimizer states: {str(e2)}")
             raise RuntimeError(f"Failed to load DeepSpeed checkpoint from {load_dir} with tag {tag}: {str(e2)}")
-
     
 # compute and clip gradient
 def get_and_clip_grad_norm(accelerator, model, loss, max_norm: float = 1.0):
@@ -328,13 +260,11 @@ def build_param_groups(model, wd):
 
 def train(config):
 
-
     # === Set logging ===
     save_dir = get_with_warning(config, "save_dir", "checkpoints")
     log_path = setup_logging(save_dir)
     
     # === WandB and Swanlab ===
-    init_wandb(config, accelerator)
     init_swanlab(config, accelerator)
 
     # === Debug mode ===
@@ -380,6 +310,7 @@ def train(config):
     
     # === Logging and interval settings ===
     log_interval = get_with_warning(config, "log_interval", 100)
+    vis_interval = get_with_warning(config, "vis_interval", 100)
     ckpt_interval = get_with_warning(config, "ckpt_interval", 1000)
     max_norm = get_with_warning(config, "grad_clip_norm", 1.0)
 
@@ -419,11 +350,11 @@ def train(config):
 
 
     if accelerator.is_main_process:
-        
+        unwrapped_model = accelerator.unwrap_model(model)
         inspect_named_submodules({
-            "vision_model": model.embedder.model.vision_model,
-            "language_model": model.embedder.model.language_model,
-            "action_head": model.action_head
+            "vision_model": unwrapped_model.embedder.model.vision_model,
+            "language_model": unwrapped_model.embedder.model.language_model,
+            "action_head": unwrapped_model.action_head
         })
 
     # === Training Loop ===
@@ -440,9 +371,10 @@ def train(config):
             state_mask = batch["state_mask"]
             embodiment_ids = batch["embodiment_ids"]
             fused_tokens_list = []
+            unwrapped_model = accelerator.unwrap_model(model)
             
             for prompt, images, image_mask in zip(prompts, images_batch, image_masks):
-                fused = model.get_vl_embeddings(images=images, image_mask=image_mask, prompt=prompt, return_cls_only=False)
+                fused = unwrapped_model.get_vl_embeddings(images=images, image_mask=image_mask, prompt=prompt, return_cls_only=False)
                 fused_tokens_list.append(fused.to(dtype=torch.bfloat16))
             
             fused_tokens = torch.cat(fused_tokens_list, dim=0)
@@ -491,7 +423,24 @@ def train(config):
             
             # === Logging ===
             if step % log_interval == 0:
-                log_training_step(step, loss, total_norm, clipped_norm, scheduler, dataloader, accelerator)
+                do_visualize = (step % vis_interval == 0)
+                evaluate_and_log_metrics(
+                    accelerator=accelerator,
+                    model=model,
+                    step=step,
+                    loss_mse=loss,              
+                    pred_velocity_mask=pred_velocity_mask, 
+                    target_velocity=target_velocity,      
+                    action_mask=action_mask,
+                    batch=batch,     
+                    prompts=prompts,
+                    scheduler=scheduler,
+                    dataloader=dataloader,
+                    config=config,
+                    total_norm=total_norm,
+                    clipped_norm=clipped_norm,
+                    visualize=do_visualize,  
+                )
    
             # === Save best checkpoint ===
             loss_value = loss.item()

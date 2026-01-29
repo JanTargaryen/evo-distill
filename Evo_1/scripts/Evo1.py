@@ -99,9 +99,11 @@ class EVO1(nn.Module):
         steps: int = None
     ):
         if actions_gt is None:
+            # inference
             return self.action_head.get_action(fused_tokens, state=state, action_mask=action_mask, embodiment_id=embodiment_ids, steps=steps)
         else:
-            return self.action_head(fused_tokens, state=state, actions_gt=actions_gt, action_mask=action_mask, embodiment_id=embodiment_ids, steps=steps)
+            # training
+            return self.action_head(fused_tokens, state=state, actions_gt=actions_gt, action_mask=action_mask, embodiment_id=embodiment_ids)
 
     @torch.no_grad()
     def run_inference(
