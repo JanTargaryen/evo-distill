@@ -196,6 +196,12 @@ def evaluate_and_log_metrics(
             else:
                 pred_action = torch.tensor(generated_action).squeeze(0).float().cpu()
 
+            if pred_action.ndim == 1 and gt_action.ndim == 2:
+                try:
+                    pred_action = pred_action.view(-1, gt_action.shape[-1])
+                except Exception as e:
+                    logging.warning(f"Reshape failed: pred={pred_action.shape}, gt={gt_action.shape}, err={e}")
+
             traj_img = visualize_trajectory_3d(
                 pred_action=pred_action, 
                 gt_action=gt_action, 

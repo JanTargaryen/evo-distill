@@ -353,7 +353,13 @@ class FlowmatchingActionHead(nn.Module):
         action_mask_seq = None
 
         if action_mask is not None:
-            action_mask_seq = action_mask.view(B, 1, per_action_dim).repeat(1, self.horizon, 1)
+            expected_full_size = B * self.horizon * per_action_dim
+            
+            if action_mask.numel() == expected_full_size:
+                action_mask_seq = action_mask.view(B, self.horizon, per_action_dim)
+            else:
+                action_mask_seq = action_mask.view(B, 1, per_action_dim).repeat(1, self.horizon, 1)
+                
             action_mask_seq = action_mask_seq.to(dtype=action.dtype, device=device)
 
         if not hasattr(self, "single_action_proj") and (self.horizon == 1 or self.action_encoder is None):
