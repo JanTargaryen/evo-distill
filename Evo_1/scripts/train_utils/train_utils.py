@@ -174,7 +174,8 @@ def evaluate_and_log_metrics(
             state_input = batch["states"][idx].unsqueeze(0).to(device=accelerator.device, dtype=torch.bfloat16) 
             image_mask_input = batch["image_masks"][idx].unsqueeze(0).to(device=accelerator.device)
             action_mask_input = batch["action_mask"][idx].unsqueeze(0).to(device=accelerator.device, dtype=torch.bfloat16)
-            images_input = batch["images"][idx] 
+            image_mask_input = batch["image_masks"][idx].to(device=accelerator.device) 
+            images_input = batch["images"][idx]
             
             inference_steps = 10 
             
