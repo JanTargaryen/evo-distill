@@ -28,6 +28,7 @@ from scripts.train_utils.train_utils import(
     evaluate_and_log_metrics,
 )
 import warnings
+from safetensors.torch import load_file as safe_load_file
 
 accelerator = Accelerator()
 
@@ -184,15 +185,18 @@ def save_checkpoint(save_dir, step, model_engine, loss, accelerator, config=None
         checkpoint_meta = {
             "type": "ds_model" if hasattr(model_engine, "save_checkpoint") else "ddp_model",
             "version": 0.0,
-            "checkpoints": "mp_rank_00_model_states.pt" # 仅作占位，DDP 模式下通常不使用此文件加载
+            "checkpoints": "mp_rank_00_model_states.pt"
         }
         with open(checkpoint_meta_path, "w") as f:
             json.dump(checkpoint_meta, f, indent=2)
         logging.info(f"[Rank {accelerator.process_index}] Saved checkpoint to {checkpoint_dir}")
 
 def load_checkpoint_with_deepspeed(model_engine, load_dir, accelerator, tag="step_best", load_optimizer_states=True, resume_pretrain=False):
-    if hasattr(model_engine, "load_checkpoint"):
-        # DeepSpeed 
+    ckpt_path = os.path.join(load_dir, tag)
+    
+    is_ds_checkpoint = os.path.exists(os.path.join(ckpt_path, "mp_rank_00_model_states.pt"))
+
+    if hasattr(model_engine, "load_checkpoint") and is_ds_checkpoint:
         try:
             load_path, client_state = model_engine.load_checkpoint(
                 load_dir,
@@ -204,32 +208,38 @@ def load_checkpoint_with_deepspeed(model_engine, load_dir, accelerator, tag="ste
             if accelerator.is_main_process:
                 logging.info(f"Loaded DeepSpeed checkpoint from {load_dir}/{tag}")
             return client_state.get("step", 0), client_state
-            
         except Exception as e:
             if accelerator.is_main_process:
-                logging.warning(f"DeepSpeed load failed, trying weight only: {str(e)}")
-            try:
-                load_path, client_state = model_engine.load_checkpoint(
-                    load_dir,
-                    tag=tag,
-                    load_module_strict=True,
-                    load_optimizer_states=False,
-                    load_lr_scheduler_states=False
-                )
-                return client_state.get("step", 0), client_state
-            except Exception as e2:
-                raise RuntimeError(f"Failed to load DeepSpeed checkpoint: {str(e2)}")
+                logging.warning(f"DeepSpeed native load failed: {e}. Falling back to manual load...")
+
+    
+    if accelerator.is_main_process:
+        logging.info(f"Loading checkpoint manually (weights only) from {ckpt_path} ...")
+
+    model_path = os.path.join(ckpt_path, "model.safetensors")
+    if not os.path.exists(model_path):
+        model_path = os.path.join(ckpt_path, "pytorch_model.bin")
+    
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Could not find model weights at {ckpt_path}. (Expected model.safetensors, pytorch_model.bin or mp_rank_*.pt)")
+
+    if model_path.endswith(".safetensors"):
+        state_dict = safe_load_file(model_path)
     else:
-        # DDP / Accelerate 
-        ckpt_path = os.path.join(load_dir, tag)
-        if accelerator.is_main_process:
-            logging.info(f"Loading Accelerate/DDP checkpoint from {ckpt_path}")
-        
-        try:
-            accelerator.load_state(ckpt_path)
-            return 0, {} 
-        except Exception as e:
-             raise RuntimeError(f"Failed to load DDP checkpoint from {ckpt_path}: {str(e)}")
+        state_dict = torch.load(model_path, map_location="cpu")
+
+    unwrapped_model = accelerator.unwrap_model(model_engine)
+    
+    missing, unexpected = unwrapped_model.load_state_dict(state_dict, strict=False)
+    
+    if accelerator.is_main_process:
+        logging.info(f"Manual weights loaded successfully.")
+        logging.info(f"Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
+        if resume_pretrain:
+            logging.info("Resume Pretrain Mode: Optimizer states were ignored. Training starts from step 0.")
+    
+    return 0, {}
+
 # compute and clip gradient
 def get_and_clip_grad_norm(accelerator, model, loss, max_norm: float = 1.0):
 
