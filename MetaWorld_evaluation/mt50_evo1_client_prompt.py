@@ -440,7 +440,7 @@ async def eval_mt50_with_groups(server_url: str,
             msg = (f"[Task {idx} {slug}]->"
                    f"success_rate={task_rate:.3f}  latency={avg_task_lat:.2f}ms "
                    f"steps={avg_diff_steps:.1f}  sim_avg={avg_sim:.4f}  sim_min={min_sim:.4f}  mag_avg={avg_mag:.4f} "
-                   f"(s={s}, t={t})",
+                   f"(s={s}, t={t})"
                    f"{task_prompt} finished {num_eval_episodes} episodes")
             log_write(msg)
 

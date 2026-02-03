@@ -50,7 +50,6 @@ tmux send-keys -t $SESSION:0.1 "source ~/.bashrc" C-m
 tmux send-keys -t $SESSION:0.1 "conda activate metaworld" C-m
 tmux send-keys -t $SESSION:0.1 "export CUDA_VISIBLE_DEVICES=$GPU_ID" C-m
 tmux send-keys -t $SESSION:0.1 "cd /mnt/data_ssd/zhoufang/code/Evo-1/MetaWorld_evaluation" C-m
-
 tmux send-keys -t $SESSION:0.1 "echo '[INFO] Waiting 20s for Server to load model...'" C-m
 tmux send-keys -t $SESSION:0.1 "sleep 120" C-m
 

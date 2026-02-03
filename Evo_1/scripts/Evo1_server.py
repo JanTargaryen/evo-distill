@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 from torchvision import transforms
 from fvcore.nn import FlopCountAnalysis
-
+from safetensors.torch import load_file as safe_load_file
 
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -69,10 +69,19 @@ def load_model_and_normalizer(ckpt_dir):
     config["num_inference_timesteps"] = 50
 
     model = EVO1(config).eval()
-    ckpt_path = os.path.join(ckpt_dir, "mp_rank_00_model_states.pt")
-
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
-    model.load_state_dict(checkpoint["module"], strict=True)
+    safetensors_path = os.path.join(ckpt_dir, "model.safetensors")
+    deepspeed_path = os.path.join(ckpt_dir, "mp_rank_00_model_states.pt")
+    
+    if os.path.exists(safetensors_path):
+        print(f"Loading from safetensors: {safetensors_path}")
+        state_dict = safe_load_file(safetensors_path)
+        model.load_state_dict(state_dict, strict=True)
+    elif os.path.exists(deepspeed_path):
+        print(f"Loading from DeepSpeed checkpoint: {deepspeed_path}")
+        checkpoint = torch.load(deepspeed_path, map_location="cpu")
+        model.load_state_dict(checkpoint["module"], strict=True)
+    else:
+        raise FileNotFoundError(f"No checkpoint found in {ckpt_dir}. Expected model.safetensors or mp_rank_00_model_states.pt")
     model = model.to("cuda")
 
     normalizer = Normalizer(stats)
