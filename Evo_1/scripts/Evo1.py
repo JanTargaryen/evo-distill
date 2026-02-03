@@ -96,14 +96,39 @@ class EVO1(nn.Module):
         actions_gt: torch.Tensor = None,
         action_mask: torch.Tensor = None,
         embodiment_ids: torch.Tensor = None,
-        steps: int = None
+        steps: int = None,
+        layer_idx: int = -1
     ):
         if actions_gt is None:
             # inference
+            # Input fused_tokens is [B, Num_Exits, N, D]. Select specific layer for inference.
+            # Default to -1 (last layer/Deepest)
+            if fused_tokens.dim() == 4: 
+                fused_tokens = fused_tokens[:, layer_idx, :, :]
+            elif fused_tokens.dim() == 3 and fused_tokens.shape[1] == 4: 
+                fused_tokens = fused_tokens[:, layer_idx, :].unsqueeze(1)
+            
             return self.action_head.get_action(fused_tokens, state=state, action_mask=action_mask, embodiment_id=embodiment_ids, steps=steps)
         else:
             # training
-            return self.action_head(fused_tokens, state=state, actions_gt=actions_gt, action_mask=action_mask, embodiment_id=embodiment_ids)
+            # Input fused_tokens is [B, Num_Exits, N, D].
+            # We iterate over all exits and compute predictions for each.
+            # We assume Shared Head (same action_head weights for all layers).
+            
+            pred_velocities = []
+            noises = []
+            
+            # fused_tokens shape: [B, Num_Exits, Seq, Dim]
+            num_exits = fused_tokens.shape[1]
+            
+            for i in range(num_exits):
+                tokens_i = fused_tokens[:, i, :, :] # [B, Seq, Dim]
+                pred_v, noise = self.action_head(tokens_i, state=state, actions_gt=actions_gt, action_mask=action_mask, embodiment_id=embodiment_ids)
+                pred_velocities.append(pred_v)
+                noises.append(noise)
+                
+            # Stack results: [B, Num_Exits, ...]
+            return torch.stack(pred_velocities, dim=1), torch.stack(noises, dim=1)
 
     @torch.no_grad()
     def run_inference(
@@ -114,7 +139,8 @@ class EVO1(nn.Module):
         state_input: Union[list, torch.Tensor],
         return_cls_only: Union[bool, None] = None,
         action_mask: Union[torch.Tensor, None] = None,
-        steps: int = None
+        steps: int = None,
+        layer_idx: int = -1
     ):
         t0 = time.time()
         fused_tokens = self.get_vl_embeddings(
@@ -125,8 +151,7 @@ class EVO1(nn.Module):
                     )
 
         state_tensor = self.prepare_state(state_input)  
-        
-        action, metadata = self.predict_action(fused_tokens, state_tensor, action_mask=action_mask,steps=steps)
+        action, metadata = self.predict_action(fused_tokens, state_tensor, action_mask=action_mask, steps=steps, layer_idx=layer_idx)
         
         t1 = time.time()
         latency = (t1 - t0) * 1000

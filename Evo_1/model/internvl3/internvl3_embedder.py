@@ -248,6 +248,13 @@ class InternVL3Embedder(nn.Module):
             output_hidden_states=True,
             return_dict=True,
         )
-        fused_hidden = outputs.hidden_states[-1].to(torch.float32)
+        # not return last layer, but middle indices
+        exit_indices = [7, 9, 11, 13] 
+        selected_hiddens = [outputs.hidden_states[i].to(torch.float32) for i in exit_indices]
+        
+        fused_hidden_stack = torch.stack(selected_hiddens, dim=1)
 
-        return fused_hidden[:, 0, :] if return_cls_only else fused_hidden
+        if return_cls_only:
+            return fused_hidden_stack[:, :, 0, :]
+        else:
+            return fused_hidden_stack

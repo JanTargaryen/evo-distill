@@ -172,43 +172,49 @@ def evaluate_and_log_metrics(
             unwrapped_model = accelerator.unwrap_model(model)
             
             state_input = batch["states"][idx].unsqueeze(0).to(device=accelerator.device, dtype=torch.bfloat16) 
-            image_mask_input = batch["image_masks"][idx].unsqueeze(0).to(device=accelerator.device)
+            image_mask_input = batch["image_masks"][idx].to(device=accelerator.device)
             action_mask_input = batch["action_mask"][idx].unsqueeze(0).to(device=accelerator.device, dtype=torch.bfloat16)
-            image_mask_input = batch["image_masks"][idx].to(device=accelerator.device) 
             images_input = batch["images"][idx]
             
             inference_steps = 10 
             
-            with torch.no_grad(), torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                generated_action, _, _ = unwrapped_model.run_inference(
-                    images=images_input,
-                    image_mask=image_mask_input,
-                    prompt=prompt,
-                    state_input=state_input,
-                    action_mask=action_mask_input,
-                    steps=inference_steps
-                )
+            layers_to_eval = [0, -1] 
             
             gt_action = batch["actions"][idx].detach().float().cpu() 
+
+            for layer_idx in layers_to_eval:
+                with torch.no_grad(), torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    generated_action, _, _ = unwrapped_model.run_inference(
+                        images=images_input,
+                        image_mask=image_mask_input,
+                        prompt=prompt,
+                        state_input=state_input,
+                        action_mask=action_mask_input,
+                        steps=inference_steps,
+                        layer_idx=layer_idx 
+                    )
             
-            if isinstance(generated_action, torch.Tensor):
-                pred_action = generated_action.detach().squeeze(0).float().cpu()
-            else:
-                pred_action = torch.tensor(generated_action).squeeze(0).float().cpu()
+                if isinstance(generated_action, torch.Tensor):
+                    pred_action = generated_action.detach().squeeze(0).float().cpu()
+                else:
+                    pred_action = torch.tensor(generated_action).squeeze(0).float().cpu()
 
-            if pred_action.ndim == 1 and gt_action.ndim == 2:
-                try:
-                    pred_action = pred_action.view(-1, gt_action.shape[-1])
-                except Exception as e:
-                    logging.warning(f"Reshape failed: pred={pred_action.shape}, gt={gt_action.shape}, err={e}")
+                if pred_action.ndim == 1 and gt_action.ndim == 2:
+                    try:
+                        pred_action = pred_action.view(-1, gt_action.shape[-1])
+                    except Exception as e:
+                        logging.warning(f"Reshape failed: pred={pred_action.shape}, gt={gt_action.shape}, err={e}")
 
-            traj_img = visualize_trajectory_3d(
-                pred_action=pred_action, 
-                gt_action=gt_action, 
-                step=step, 
-                prompt=f"{prompt} (Steps={inference_steps})"
-            )
-            vis_images = {"trajectory_comparison": traj_img}
+                layer_tag = "Fast(L0)" if layer_idx == 0 else "Final(L-1)"
+                
+                traj_img = visualize_trajectory_3d(
+                    pred_action=pred_action, 
+                    gt_action=gt_action, 
+                    step=step, 
+                    prompt=f"{prompt}\nMode: {layer_tag}, Steps={inference_steps}"
+                )
+                
+                vis_images[f"traj_{layer_tag}"] = traj_img
 
         except Exception as e:
             logging.warning(f"Visualization failed at step {step}: {e}")

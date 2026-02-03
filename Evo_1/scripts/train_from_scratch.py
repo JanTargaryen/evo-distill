@@ -34,7 +34,6 @@ accelerator = Accelerator()
 
 # read module dict , print which is trainable , which is frozen
 def inspect_named_submodules(module_dict: dict, verbose: bool = True):
-
     total_all, trainable_all = 0, 0
     logging.info("\n Parameter Inspection by Module:")
     logging.info("=" * 70)
@@ -190,6 +189,7 @@ def save_checkpoint(save_dir, step, model_engine, loss, accelerator, config=None
         with open(checkpoint_meta_path, "w") as f:
             json.dump(checkpoint_meta, f, indent=2)
         logging.info(f"[Rank {accelerator.process_index}] Saved checkpoint to {checkpoint_dir}")
+
 
 def load_checkpoint_with_deepspeed(model_engine, load_dir, accelerator, tag="step_best", load_optimizer_states=True, resume_pretrain=False):
     ckpt_path = os.path.join(load_dir, tag)
@@ -400,24 +400,44 @@ def train(config):
 
             with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
 
-                pred_velocity, noise = model(fused_tokens, state=states, actions_gt=actions_gt, action_mask=action_mask)
+                # pred_velocity_stack shape: [B, Num_Exits, Seq, Dim]
+                pred_velocity_stack, noise_stack = model(fused_tokens, state=states, actions_gt=actions_gt, action_mask=action_mask)
                 
-            target_velocity = (actions_gt - noise).view(actions_gt.shape[0], -1)
-            
-            assert pred_velocity.shape == target_velocity.shape
+                total_loss = 0.0
+                num_exits = pred_velocity_stack.shape[1]
+                
+                if action_mask.sum() == 0:
+                    raise ValueError(f"[Step {step}] All actions masked!")
+                # flatten mask to abroast
+                flat_mask = action_mask.view(action_mask.shape[0], -1).to(dtype=pred_velocity_stack.dtype)
+                scale_factor = flat_mask.numel() / (flat_mask.sum() + 1e-8) # prevent mask dilution
 
-            if action_mask.sum() == 0:
-                raise ValueError(f"[Step {step}] action_mask.sum() is 0! All actions are masked. "
-                            f"This indicates a problem with the data or mask generation. "
-                            f"action_mask shape: {action_mask.shape}, "
-                            f"action_mask: {action_mask}")
-            
+                # compute all layer loss
+                for i in range(num_exits):
+                    pred_v = pred_velocity_stack[:, i] 
+                    noise_v = noise_stack[:, i]
+                    
+                    # compute Target (actions_gt - noise)
+                    target_v = (actions_gt - noise_v).view(actions_gt.shape[0], -1)
+                    
+                    # mask
+                    pred_v_masked = pred_v * flat_mask
+                    target_v_masked = target_v * flat_mask 
+                    
+                    loss_i = loss_fn(pred_v_masked, target_v_masked) * scale_factor
+                    total_loss += loss_i
+                
+                loss = total_loss / num_exits 
+                
+                # metrics & logs
+                pred_velocity = pred_velocity_stack[:, -1]
+                noise_last = noise_stack[:, -1]
+                target_velocity = (actions_gt - noise_last).view(actions_gt.shape[0], -1)
 
-            action_mask = action_mask.view(action_mask.shape[0], -1).to(dtype=pred_velocity.dtype)
-            pred_velocity_mask = pred_velocity * action_mask
-            loss = loss_fn(pred_velocity_mask, target_velocity)
-            scale_factor = action_mask.numel() / (action_mask.sum() + 1e-8)
-            loss = loss * scale_factor
+                # (B, Dim)
+                action_mask_view = action_mask.view(action_mask.shape[0], -1).to(dtype=pred_velocity.dtype)
+                
+                pred_velocity_mask = pred_velocity * action_mask_view
             
             # === NaN/Inf check ===
             if not check_numerical_stability(
@@ -425,7 +445,7 @@ def train(config):
                 states=states,
                 actions_gt=actions_gt,
                 fused_tokens=fused_tokens,
-                pred_velocity=pred_velocity,
+                pred_velocity=pred_velocity, # input the last layer to check
                 loss=loss
             ):
                 continue
@@ -443,14 +463,17 @@ def train(config):
             # === Logging ===
             if step % log_interval == 0:
                 do_visualize = (step % vis_interval == 0)
+                
+                target_velocity_for_log = target_velocity * action_mask_view
+
                 evaluate_and_log_metrics(
                     accelerator=accelerator,
                     model=model,
                     step=step,
                     loss_mse=loss,              
-                    pred_velocity_mask=pred_velocity_mask, 
-                    target_velocity=target_velocity,      
-                    action_mask=action_mask,
+                    pred_velocity_mask=pred_velocity_mask, # last layer pred
+                    target_velocity=target_velocity_for_log, # last layer 
+                    action_mask=action_mask_view,
                     batch=batch,     
                     prompts=prompts,
                     scheduler=scheduler,
@@ -493,7 +516,6 @@ def train(config):
 
             # === Save periodic checkpoint ===
             if step % ckpt_interval == 0 and step > 0:
-                checkpoint_path = os.path.join(save_dir, f"checkpoint_step_{step}.pt")
                 save_checkpoint(save_dir, step=step, model_engine=model_engine, loss=loss, accelerator=accelerator, config=config, norm_stats=dataset.arm2stats_dict)
          
     # === Save final model ===

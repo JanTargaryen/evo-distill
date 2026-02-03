@@ -6,7 +6,7 @@ max_views: 3
 data_groups:
   metaworld_sawyer:
     Evo1_MetaWorld:
-      path: /mnt/data_ssd/zhoufang/code/Evo-1/MetaWorld_evaluation/Metaworld_Dataset/Evo1_MetaWorld_Dataset
+      path: ../MetaWorld_evaluation/Metaworld_Dataset/Evo1_MetaWorld_Dataset
       view_map:
         image_1: observation.images.image
 
